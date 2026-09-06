@@ -25,7 +25,9 @@ def main():
     print(f"DEM {dem.shape}, {meta['crs']}")
 
     G = streets.fetch_graph()
-    water = streets.fetch_water()
+    water = gpd.read_file(streets.WATER_PATH) if streets.WATER_PATH.exists() else None
+    if water is None:
+        print("no data/water.gpkg yet: seeding from DEM only, near_inlet all False")
     edges = streets.edges_gdf(G)
     print(f"{len(edges)} edges")
 

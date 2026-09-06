@@ -79,5 +79,12 @@ DEPTH_VELOCITY_LIMIT_M2S = {
 # stricter band: their effective depth limit is multiplied by this factor.
 INLET_SAFETY_FACTOR = 0.5
 
+# --- Flood-fill seeds ---------------------------------------------------------
+# 3DEP hydro-flattens open water. In the Manhasset Bay tile the bay surface
+# sits at about -1.1 m NAVD88 (35% of pixels are <= -1.0 m and form one
+# connected component touching the raster edge). Any pixel at or below this
+# value is treated as open water and seeds the connected flood-fill.
+SEED_ELEVATION_M = -1.0
+
 # --- Road segmentation ------------------------------------------------------
 SEGMENT_LENGTH_M = 15

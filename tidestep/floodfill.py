@@ -13,7 +13,8 @@ second for a 4400 x 4200 grid.
 
 Seeds (open water) are the union of:
 * DEM cells that are nodata (LiDAR returns nothing over water), and
-* DEM cells at or below MLLW (m NAVD88), and
+* DEM cells at or below config.SEED_ELEVATION_M (the hydro-flattened
+  water surface in the 3DEP tile; see config), and
 * pixels inside OSM water polygons (natural=water, bay, coastline areas).
 Only seed components that touch the tidal water body are relevant; inland
 ponds would also be seeds, so the OSM layer is filtered to tidal features
@@ -27,7 +28,6 @@ from scipy import ndimage
 
 from . import config
 
-MLLW_NAVD88_M = -config.MLLW_TO_NAVD88_M  # MLLW expressed in m NAVD88 (-1.283)
 
 STRUCTURE_4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
 
@@ -35,7 +35,7 @@ STRUCTURE_4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
 def build_seed_mask(dem: np.ndarray, transform, water_gdf=None,
                     dem_crs=None) -> np.ndarray:
     """Boolean mask of open-water pixels."""
-    seeds = np.isnan(dem) | (dem <= MLLW_NAVD88_M)
+    seeds = np.isnan(dem) | (dem <= config.SEED_ELEVATION_M)
     if water_gdf is not None and len(water_gdf):
         w = water_gdf
         if dem_crs is not None:

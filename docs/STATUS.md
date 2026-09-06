@@ -19,9 +19,17 @@ Updated: 2026-09-06
   flags). `scripts/build_hazard.py` runs them. Synthetic-terrain tests pass,
   including the cut-off-basin case the bathtub model gets wrong.
 
+- Stages 2-3 (data): `scripts/build_hazard.py` ran on the real DEM
+  (3913 x 4214 px, 1 m) and street graph (770 nodes / 1944 edges -> 5830
+  segments) in 18 s. At the 2026-09-07 00Z peak (1.59 m NAVD88) 60 segments
+  flood, all waterfront footways/paths (Manhasset Bay Walk etc.), no roads
+  — consistent with the level being below NWS minor stage (1.77 m).
+  Seed rule changed from MLLW to `SEED_ELEVATION_M = -1.0` because 3DEP
+  hydro-flattens the bay at about -1.1 m NAVD88 (see config.py).
+
 ## Next
-- Confirm DEM + streets downloads finished, then run
-  `python scripts/build_hazard.py` and look at the per-hour summary.
+- `data/water.gpkg` (OSM water features) had not downloaded yet when
+  build_hazard ran, so near_inlet is all False. Re-run once it exists.
 - Run `python scripts/check_ofs_bias.py`: the OFS-minus-predictions
   column was 0.4-1.1 m all day, which is either real weather or a datum
   mismatch in the OFS product. Must be settled before Stage 9.
