@@ -92,8 +92,15 @@ def fetch_predictions(start: datetime | None = None,
 
 
 def fetch_observed(start: datetime, hours: int) -> pd.Series:
-    """Verified/preliminary observations, hourly, m NAVD88. For Stage 9."""
-    body = _get({"product": "hourly_height", **_window(start, hours)})
+    """Observed water level (6-minute preliminary, hourly max), m NAVD88.
+
+    ``water_level`` covers the last ~30 days including today; the verified
+    ``hourly_height`` product lags by weeks, so for historical Stage 9 runs
+    older than a month switch to ``product="hourly_height"``.
+    """
+    product = "water_level" if start > datetime.now(timezone.utc) - timedelta(days=28) \
+        else "hourly_height"
+    body = _get({"product": product, **_window(start, hours)})
     return to_hourly_navd88(_to_series(body, "data"))
 
 

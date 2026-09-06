@@ -54,9 +54,15 @@ def fetch_water(bbox=config.BBOX, force: bool = False) -> gpd.GeoDataFrame:
     tags = {"natural": ["water", "coastline", "bay", "wetland"],
             "water": True, "waterway": True}
     gdf = ox.features_from_bbox(bbox=(west, south, east, north), tags=tags)
-    gdf = gdf.reset_index()[["osmid", "geometry"] +
-                            [c for c in ("natural", "water", "waterway", "name")
-                             if c in gdf.columns]]
+    gdf = gdf.reset_index()
+    # osmnx 2.x indexes features by (element, id); older versions by osmid
+    if "osmid" not in gdf.columns and "id" in gdf.columns:
+        gdf = gdf.rename(columns={"id": "osmid"})
+    keep = ["osmid", "geometry"] + [c for c in ("element", "natural", "water",
+                                                "waterway", "tidal", "name")
+                                    if c in gdf.columns]
+    gdf = gdf[keep]
     gdf = gdf[gdf.geometry.notna()].to_crs(4326)
+    gdf["osmid"] = gdf["osmid"].astype(str)
     gdf.to_file(WATER_PATH, driver="GPKG")
     return gdf
