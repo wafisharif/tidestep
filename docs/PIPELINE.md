@@ -1,0 +1,40 @@
+# TideStep pipeline (as written by the team)
+
+## Stage 0 — Scope decisions (lock these first, they shape everything downstream)
+Pick one reference NOAA tide station near your district's coastline and a bounding box of coastal roads around it — don't try to cover all of NY-03 at once, a few square miles of flood-prone North Shore streets is plenty for a working demo. Decide the forecast window is 24 hours ahead, refreshed hourly. Decide, up front, that you're modeling still-water tidal ponding, not fast-flowing storm surge or riverine flooding — this is an honest and correct scope choice for routine high-tide flooding (the everyday case, not the once-a-decade hurricane case), and it's what lets you skip building a full hydrodynamic velocity model, which would otherwise be a multi-month project on its own.
+
+## Stage 1 — Data acquisition
+Water levels: pull from NOAA's CO-OPS API (api.tidesandcurrents.noaa.gov), which is free, keyless, and returns JSON/CSV. Use the ofs_water_level product from NYOFS (the New York and New Jersey Operational Forecast System, NOAA's hydrodynamic model covering NY Harbor and Long Island Sound) rather than the plain predictions product — NYOFS gives you model-based water level guidance that already folds in wind setup and short-term surge, not just the pure astronomical tide curve, which matters because two structurally identical tide days can flood very differently depending on wind. Pull predictions too, as a clear-weather baseline you can diff against to show "how much of today's flooding is wind/surge-driven vs. just the moon." Also pull the datums product for your station — this gives the offsets between MLLW, MSL, and NAVD88 for that specific station, and you need it because CO-OPS reports water levels relative to a tidal datum while your elevation data is referenced to NAVD88. Skipping this conversion is the single most common way a flood model like this silently produces garbage, so treat it as a required step, not an optional nicety.
+
+Elevation: pull LiDAR-derived DEM data from USGS 3DEP, either through The National Map's download service or directly as cloud-optimized GeoTIFFs from the USGS 3DEP AWS Registry of Open Data bucket — the AWS route lets you stream just your bounding box instead of downloading a huge regional tile, which matters on a laptop. 3DEP coastal coverage is typically 1-meter resolution or better and referenced to NAVD88, which lines up with the datum-converted water levels from Stage 1.
+
+Street network: pull OpenStreetMap road geometry for your bounding box using osmnx (Python) or a direct Overpass API query. Keep the bounding box tight — this keeps your graph small enough to route on with plain Python, which matters for Stage 6.
+
+Thresholds: the per-station minor/moderate/major flood elevation thresholds are set by the local NWS forecast office based on historical impact records (or, where NWS hasn't defined one, derived from NOAA Technical Report NOS CO-OPS 086's methodology, the same report behind the Annual High Tide Flooding Outlook). Look up your specific station's published numbers once and hardcode them — this is a fixed reference value for a given station, not something that needs a live API call. Same treatment for the depth×velocity safety thresholds from the UK Environment Agency and UNSW Water Research Laboratory work (child: 0.4 m²/s significant hazard, ~0.5m still-water depth limit; adult: 0.6–0.8 m²/s, ~1.2m; vehicle classes: 0.3/0.4/0.5m still-water depth by size) — these go into a constants file, cited to their source paper in your write-up.
+
+## Stage 2 — Turning elevation + water level into "which streets flood"
+Break each OSM road way into short segments (10–20m). For each segment, sample the minimum DEM elevation along its footprint (not the average — water finds the low point first). Then, critically, don't just flag "segment elevation < forecast water level" as flooded — that naive threshold approach (a "bathtub model") will incorrectly flag low-lying inland spots that aren't actually hydraulically connected to the tide. NOAA's own Sea Level Rise Viewer methodology specifically corrects for this by only marking a location flooded if it's below the water surface and reachable from open water through a continuous path of also-submerged cells. Do the same: implement a flood-fill (BFS/DFS) starting from known coastal/water-body pixels in your DEM, expanding only into adjacent cells below the current water-surface elevation. A segment only gets marked flooded if it falls inside that connected flood-fill region at that hour.
+
+## Stage 3 — Depth and hazard classification per segment per hour
+For each segment, for each of the 24 forecast hours: depth = datum-converted forecast water surface elevation minus segment ground elevation, for segments inside the connected flood region (zero/not-flooded otherwise). Classify using the still-water depth thresholds as the primary rule. For segments near a direct inlet, culvert, or narrow channel crossing — where local flow genuinely accelerates — flag them separately and apply a stricter, more conservative threshold band rather than trying to compute real velocity; this is a stated, deliberate simplification. Each (segment, hour) pair ends up with: child-safe (bool), adult-safe (bool), vehicle-safe (bool, per vehicle-size profile), plus the raw predicted depth in cm.
+
+## Stage 4 — Storage
+PostgreSQL with the PostGIS extension. Road segment geometries as PostGIS LineStrings; hazard results in a time-series table keyed by (segment_id, forecast_hour) with the three boolean flags and depth value.
+
+## Stage 5 — Backend API
+FastAPI. Three endpoints: a risk-map endpoint returning GeoJSON of segment hazard states for a given hour, a routing endpoint taking origin/destination/profile/departure-time and returning a flood-avoiding route, and a saved-routes endpoint for the alerting feature.
+
+## Stage 6 — Routing engine
+Load the OSM graph with osmnx, run shortest-path with networkx (Dijkstra or A*), and write a custom edge-weight function that sets any edge's weight to infinity when its corresponding segment is unsafe for the requested profile at the requested hour. The graph is small enough to recompute per query. For the "2.0" section of the write-up, mention OSRM's traffic-update mechanism (CSV of edge speeds hot-swapped via osrm-datastore) as the path to a production version. MVP uses the hazard state at departure time for the whole route; note the "hazard at the hour you'd actually be on each segment" refinement as a known limitation.
+
+## Stage 7 — Frontend
+Leaflet or Mapbox GL JS, segments color-coded by hazard severity, with a time slider scrubbing through the 24-hour window. A simple form for origin/destination plus a profile selector (child / adult / vehicle) overlays the computed route. Build the slider early for demo footage.
+
+## Stage 8 — Alerts and the operational loop
+An hourly cron job: pull fresh CO-OPS OFS and predictions data, recompute the segment/hour hazard grid for the rolling 24-hour window, write it to PostGIS, check every saved route against the new data, and fire a notification if a saved route just crossed its threshold for the first time. Email or SMS (Twilio/SendGrid) for the demo; native push is a 2.0 item.
+
+## Stage 9 — Validation (before demo day)
+Pick real past high-tide-flooding days at the reference station (NOAA Annual High Tide Flooding Outlook, local news/DOT road-closure reports) and run the model retroactively. Check: did the flood-fill connectivity logic correctly include/exclude the streets that were actually reported flooded, and were predicted depths in a reasonable range.
+
+## Stage 10 — Limitations to state up front
+The bathtub-plus-connectivity model doesn't account for storm-drain infrastructure (which can locally reduce or, via backflow, worsen flooding); wave run-up isn't modeled, so accuracy is best on sound-side ponding streets and weaker on open-water-facing ones; velocity is assumed near-zero except near flagged inlet segments.

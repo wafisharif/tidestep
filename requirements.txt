@@ -1,0 +1,14 @@
+requests
+numpy
+pandas
+rasterio
+geopandas
+shapely
+osmnx
+networkx
+scipy
+fastapi
+uvicorn
+psycopg[binary]
+sqlalchemy
+geoalchemy2
