@@ -10,9 +10,14 @@ STATION_NAME = "Kings Point, NY"
 STATION_LAT = 40.8103
 STATION_LON = -73.7649
 
-# --- Study area (Manhasset Bay shoreline) ----------------------------------
-# (south, west, north, east) in WGS84 degrees
-BBOX = (40.800, -73.750, 40.840, -73.700)
+# --- Study area (Manhasset Bay + Kings Point) -------------------------------
+# (south, west, north, east) in WGS84 degrees. About 6.7 km x 5.5 km.
+# Covers the Kings Point gauge, Great Neck / Kings Point / Great Neck
+# Estates on the west shore, Manhasset Bay, and Manhasset Isle / Manorhaven /
+# Port Washington Shore Road on the east shore. The first bbox
+# (40.80,-73.75,40.84,-73.70) cut the gauge off and, because the two shores
+# only connect by road south of the bay, osmnx kept only the east shore.
+BBOX = (40.795, -73.775, 40.845, -73.695)
 
 # --- Forecast window -------------------------------------------------------
 FORECAST_HOURS = 24

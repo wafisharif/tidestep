@@ -1,0 +1,16 @@
+# Stage 4: PostGIS. Start with `docker compose up -d`; stop with `docker compose down`.
+# Data persists in the named volume between restarts.
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: tidestep-db
+    environment:
+      POSTGRES_USER: tidestep
+      POSTGRES_PASSWORD: tidestep
+      POSTGRES_DB: tidestep
+    ports:
+      - "5432:5432"
+    volumes:
+      - tidestep-pgdata:/var/lib/postgresql/data
+volumes:
+  tidestep-pgdata:

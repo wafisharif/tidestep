@@ -29,8 +29,11 @@ def fetch_graph(bbox=config.BBOX, force: bool = False) -> nx.MultiDiGraph:
         return ox.load_graphml(GRAPH_PATH)
     south, west, north, east = bbox
     # osmnx >= 2.0 takes bbox as (left, bottom, right, top)
+    # retain_all=True: the two shores of Manhasset Bay only connect by road
+    # south of the bbox, so "largest component only" would silently drop one
+    # side. Disconnected pieces are fine; the router reports "no path".
     G = ox.graph_from_bbox(bbox=(west, south, east, north),
-                           network_type="all", simplify=True, retain_all=False)
+                           network_type="all", simplify=True, retain_all=True)
     G = ox.add_edge_speeds(G)
     G = ox.add_edge_travel_times(G)
     ox.save_graphml(G, GRAPH_PATH)

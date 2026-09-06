@@ -29,6 +29,15 @@ def split_line(line: LineString, seg_len: float) -> list[LineString]:
     return [substring(line, i * step, (i + 1) * step) for i in range(n)]
 
 
+def _tag(v):
+    """OSM tag -> plain string (lists become 'a;b', NaN/None -> None)."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    if isinstance(v, (list, tuple)):
+        return ";".join(map(str, v))
+    return str(v)
+
+
 def segment_edges(edges: gpd.GeoDataFrame,
                   seg_len: float = config.SEGMENT_LENGTH_M) -> gpd.GeoDataFrame:
     """Return one row per segment with edge keys, index within edge, geometry
@@ -38,8 +47,8 @@ def segment_edges(edges: gpd.GeoDataFrame,
     for _, e in metric.iterrows():
         for i, piece in enumerate(split_line(e.geometry, seg_len)):
             rows.append({"u": e.u, "v": e.v, "key": e.key, "seg_idx": i,
-                         "highway": str(e.get("highway", "")),
-                         "name": str(e.get("name", "")),
+                         "highway": _tag(e.get("highway")),
+                         "name": _tag(e.get("name")),
                          "length_m": piece.length, "geometry": piece})
     gdf = gpd.GeoDataFrame(rows, crs=METRIC_CRS)
     gdf.insert(0, "segment_id", np.arange(len(gdf)))

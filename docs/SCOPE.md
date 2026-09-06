@@ -37,12 +37,18 @@ Source: CO-OPS metadata API floodlevels for 8516945. NOS-derived values
 (Technical Report NOS CO-OPS 086 method) are also stored in config for
 comparison.
 
-## Bounding box: Manhasset Bay shoreline streets
+## Bounding box: Manhasset Bay and both shores
 
-`(lat 40.800–40.840, lon -73.750 to -73.700)` — about 4.4 km × 4.2 km,
-covering Kings Point, Great Neck Estates, Manhasset Isle, Manorhaven, Port
-Washington's Shore Road and the low-lying streets around the head of the
-bay. Small enough to route on with plain networkx.
+`(lat 40.795–40.845, lon -73.775 to -73.695)` — about 6.7 km × 5.5 km
+(14 sq mi), covering the Kings Point gauge, Great Neck / Kings Point /
+Great Neck Estates on the west shore, the bay, and Manhasset Isle /
+Manorhaven / Port Washington's Shore Road on the east shore. The two shores
+connect by road only south of the box, so the street graph is loaded with
+`retain_all=True`. Still small enough to route on with plain networkx.
+
+(Revised 2026-09-06: the first box, 40.80–40.84 / -73.75 to -73.70, left
+the gauge outside and lost the whole west shore to osmnx's
+largest-component filter.)
 
 ## Forecast window
 24 hours ahead, hourly steps, refreshed hourly.

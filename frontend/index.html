@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TideStep</title>
+<link rel="stylesheet" href="/static/leaflet.css">
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --panel:#f6f7f9; --line:#ddd; }
+  html,body { margin:0; height:100%; font:14px/1.4 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; color:var(--fg); background:var(--bg); }
+  #map { position:absolute; inset:0; }
+  #panel { position:absolute; top:12px; left:12px; z-index:1000; width:300px; background:var(--bg); border:1px solid var(--line); border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.12); padding:12px 14px; }
+  h1 { font-size:17px; margin:0 0 2px; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:10px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-top:8px; }
+  select, input[type=text], button { width:100%; box-sizing:border-box; padding:6px 8px; font:inherit; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+  button { cursor:pointer; background:#0b5fff; color:#fff; border-color:#0b5fff; margin-top:8px; }
+  button.secondary { background:var(--panel); color:var(--fg); border-color:var(--line); }
+  #time { position:absolute; left:50%; bottom:18px; transform:translateX(-50%); z-index:1000; width:min(720px, 92vw); background:var(--bg); border:1px solid var(--line); border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.12); padding:10px 14px; }
+  #time input[type=range] { width:100%; }
+  .row { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  .big { font-size:16px; font-weight:600; }
+  .legend { display:flex; gap:10px; flex-wrap:wrap; font-size:12px; margin-top:8px; }
+  .sw { display:inline-block; width:14px; height:4px; vertical-align:middle; margin-right:4px; border-radius:2px; }
+  #result { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  .wl { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <h1>TideStep</h1>
+  <div class="sub" id="station">Kings Point, NY · 24 h tidal flooding forecast</div>
+
+  <label>Who is traveling?</label>
+  <select id="profile">
+    <option value="child">Child (limit 0.5 m)</option>
+    <option value="adult" selected>Adult (limit 1.2 m)</option>
+    <option value="vehicle_small">Small car (0.3 m)</option>
+    <option value="vehicle_large">SUV / large car (0.4 m)</option>
+    <option value="vehicle_4wd">Truck / 4WD (0.5 m)</option>
+  </select>
+
+  <label>Route</label>
+  <div class="hint">Click the map to set start, click again for destination.</div>
+  <input type="text" id="from" placeholder="start: click map" readonly>
+  <input type="text" id="to" placeholder="destination: click map" readonly style="margin-top:4px">
+  <button id="go">Find safe route</button>
+  <button id="clear" class="secondary">Clear</button>
+  <div id="result"></div>
+
+  <div class="legend">
+    <span><i class="sw" style="background:#2e7d32"></i>safe</span>
+    <span><i class="sw" style="background:#f9a825"></i>flooded, passable</span>
+    <span><i class="sw" style="background:#c62828"></i>unsafe for profile</span>
+    <span><i class="sw" style="background:#0b5fff;height:5px"></i>route</span>
+  </div>
+</div>
+
+<div id="time">
+  <div class="row">
+    <span class="big" id="tlabel">—</span>
+    <span class="wl" id="wl">water level — m NAVD88</span>
+    <span id="nflood">—</span>
+  </div>
+  <input type="range" id="slider" min="0" max="23" value="0" step="1">
+  <div class="row hint"><span id="t0">now</span><span>▶ <a href="#" id="play">play</a></span><span id="t1">+24 h</span></div>
+</div>
+
+<script src="/static/leaflet.js"></script>
+<script>
+const map = L.map('map', { zoomControl: true });
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+  { attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19 }).addTo(map);
+
+let hours = [], hour = 0, riskLayer = null, routeLayer = null;
+let cache = {};          // hour -> geojson
+let start = null, dest = null, startMk = null, destMk = null;
+const $ = id => document.getElementById(id);
+
+function color(p, profile) {
+  if (!p.flooded) return '#2e7d32';
+  return p['safe_' + profile] ? '#f9a825' : '#c62828';
+}
+function style(f) {
+  const p = f.properties, profile = $('profile').value;
+  return { color: color(p, profile), weight: p.flooded ? 5 : 2.5, opacity: p.flooded ? 0.95 : 0.55 };
+}
+function popup(f, layer) {
+  const p = f.properties;
+  layer.bindPopup(`<b>${p.name || p.highway || 'segment'}</b><br>
+    ground ${p.ground_m?.toFixed(2)} m NAVD88<br>
+    depth <b>${p.depth_cm} cm</b>${p.near_inlet ? ' · near inlet' : ''}<br>
+    child ${p.safe_child ? '✓' : '✗'} · adult ${p.safe_adult ? '✓' : '✗'} ·
+    car ${p.safe_vehicle_small ? '✓' : '✗'} · 4WD ${p.safe_vehicle_4wd ? '✓' : '✗'}`);
+}
+
+async function loadHours() {
+  const r = await fetch('/api/hours'); const j = await r.json();
+  hours = j.hours;
+  $('slider').max = hours.length - 1;
+  const fmt = t => new Date(t).toLocaleString([], { weekday: 'short', hour: 'numeric' });
+  $('t0').textContent = fmt(hours[0].valid_time);
+  $('t1').textContent = fmt(hours[hours.length - 1].valid_time);
+  if (j.run_time) $('station').textContent =
+    `Kings Point, NY · forecast run ${new Date(j.run_time).toLocaleString()} · NYOFS bias ${j.ofs_bias_m?.toFixed(2)} m removed`;
+}
+
+async function showHour(h) {
+  hour = h;
+  const info = hours[h];
+  $('tlabel').textContent = new Date(info.valid_time).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  $('wl').textContent = `water level ${info.water_level_m.toFixed(2)} m NAVD88`;
+  $('nflood').textContent = `${info.flooded_segments} flooded segments`;
+  if (!cache[h]) { const r = await fetch('/api/risk?hour=' + h); cache[h] = await r.json(); }
+  if (riskLayer) map.removeLayer(riskLayer);
+  riskLayer = L.geoJSON(cache[h], { style, onEachFeature: popup }).addTo(map);
+  if (!map._fitted) { map.fitBounds(riskLayer.getBounds()); map._fitted = true; }
+  if (start && dest) route();
+}
+
+async function route() {
+  if (!start || !dest) return;
+  const q = new URLSearchParams({ olat: start.lat, olon: start.lng, dlat: dest.lat, dlon: dest.lng,
+                                  profile: $('profile').value, hour });
+  const r = await fetch('/api/route?' + q); const f = await r.json();
+  if (routeLayer) map.removeLayer(routeLayer);
+  const res = $('result'); res.style.display = 'block';
+  if (!f.geometry) { res.innerHTML = '<b>No safe route</b> at this hour for this profile.'; return; }
+  routeLayer = L.geoJSON(f, { style: { color: '#0b5fff', weight: 5, opacity: 0.9 } }).addTo(map);
+  const p = f.properties;
+  const km = m => (m / 1000).toFixed(2) + ' km';
+  res.innerHTML = `<b>${km(p.length_m)}</b>` +
+    (p.baseline_blocked ? ` — the usual route (${km(p.baseline_length_m)}) crosses water; detour avoids ${p.avoided_edges} unsafe edges.`
+                        : ` — usual route is clear at this hour.`) +
+    (p.max_depth_cm_on_route > 0 ? `<br>Deepest water on route: ${p.max_depth_cm_on_route} cm.` : '');
+}
+
+map.on('click', e => {
+  if (!start) { start = e.latlng; startMk = L.marker(start).addTo(map); $('from').value = fmtLL(start); }
+  else if (!dest) { dest = e.latlng; destMk = L.marker(dest).addTo(map); $('to').value = fmtLL(dest); route(); }
+});
+const fmtLL = ll => `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`;
+$('go').onclick = route;
+$('clear').onclick = () => {
+  start = dest = null; [startMk, destMk, routeLayer].forEach(l => l && map.removeLayer(l));
+  $('from').value = $('to').value = ''; $('result').style.display = 'none';
+};
+$('profile').onchange = () => { if (riskLayer) riskLayer.setStyle(style); route(); };
+$('slider').oninput = e => showHour(+e.target.value);
+
+let timer = null;
+$('play').onclick = e => {
+  e.preventDefault();
+  if (timer) { clearInterval(timer); timer = null; e.target.textContent = 'play'; return; }
+  e.target.textContent = 'pause';
+  timer = setInterval(() => { const n = (hour + 1) % hours.length; $('slider').value = n; showHour(n); }, 700);
+};
+
+loadHours().then(() => showHour(0));
+</script>
+</body>
+</html>

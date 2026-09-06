@@ -33,9 +33,33 @@ Updated: 2026-09-06
   `fetch_forecast_frame` now subtracts the trailing 48 h mean OFS-obs bias
   (columns ofs_raw_m / ofs_bias_m / ofs_navd88_m in water_levels.csv).
 
+- Stages 4-8 (code, tested end to end against a local PostGIS in Claude's
+  sandbox with the real Sept 6 data): `docker-compose.yml` + `tidestep/db.py`
+  (schema, loaders, GeoJSON + unsafe-edge queries, saved routes),
+  `tidestep/api.py` (FastAPI: /api/hours, /api/risk, /api/route,
+  /api/routes), `tidestep/routing.py` (Dijkstra with unsafe edges removed,
+  vehicle profiles snap to drivable nodes, baseline comparison),
+  `frontend/index.html` (Leaflet, hour slider with play button, click-to-
+  route, per-profile colouring; Leaflet vendored so the demo works offline),
+  `scripts/hourly_update.py` (fetch -> hazard -> PostGIS -> saved-route
+  check -> email/log alert). 10 unit tests pass.
+
+## Bug found and fixed: study area
+The first bbox left the Kings Point gauge outside and, because the two
+shores of Manhasset Bay only connect by road south of the box, osmnx's
+default largest-component filter silently dropped the entire west shore
+(graph had nodes only between lon -73.711 and -73.700). Fixed:
+`BBOX = (40.795, -73.775, 40.845, -73.695)` and `retain_all=True`.
+**data/ must be regenerated**: delete `data/dem_1m.tif`,
+`data/streets.graphml`, `data/water.gpkg`, `data/segments.gpkg`, then run
+fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
+(about 150 MB); build_hazard should take about a minute.
+
 ## Next
-- Re-run `python scripts/fetch_all.py` then `python scripts/build_hazard.py`
-  so hazard.csv uses the bias-corrected levels.
+- Regenerate data with the new bbox (above), then run the app and record
+  the slider demo footage.
+- Stage 9: validation against past high-tide flooding days.
+- Stage 10: limitations write-up (docs/LIMITATIONS.md).
 - `data/water.gpkg` (OSM water features) had not downloaded yet when
   build_hazard ran, so near_inlet is all False. Re-run once it exists.
 - Stage 4-5: PostGIS schema + FastAPI endpoints.
