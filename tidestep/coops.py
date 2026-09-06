@@ -104,17 +104,39 @@ def fetch_observed(start: datetime, hours: int) -> pd.Series:
     return to_hourly_navd88(_to_series(body, "data"))
 
 
+def recent_ofs_bias(hours: int = 48) -> float:
+    """Mean (OFS - observed) over the last ``hours``, in metres.
+
+    On 2026-09-06 this was +0.26 m at Kings Point: NYOFS ran high against
+    the gauge while observations were 0.38 m above astronomical
+    predictions. A constant offset that size is a third of the gap between
+    MHHW and minor flood stage, so we remove it. Simple mean-bias removal
+    is the standard first correction for OFS guidance; it does not fix
+    timing errors (see docs/PIPELINE.md Stage 10).
+    """
+    start = datetime.now(timezone.utc) - timedelta(hours=hours)
+    obs = fetch_observed(start, hours)
+    ofs = fetch_ofs_forecast(start, hours)
+    d = (ofs - obs).dropna()
+    return float(d.mean()) if len(d) else 0.0
+
+
 def fetch_forecast_frame(start: datetime | None = None,
-                         hours: int = config.FORECAST_HOURS) -> pd.DataFrame:
+                         hours: int = config.FORECAST_HOURS,
+                         bias_correct: bool = True) -> pd.DataFrame:
     """Both curves side by side plus the surge/wind component.
 
-    Columns: ofs_navd88_m, pred_navd88_m, nontidal_m (ofs - pred).
+    Columns: ofs_raw_m, ofs_bias_m, ofs_navd88_m (bias-corrected, the
+    value the flood model uses), pred_navd88_m, nontidal_m (ofs - pred).
     """
     ofs = fetch_ofs_forecast(start, hours)
     pred = fetch_predictions(start, hours)
-    df = pd.concat({"ofs_navd88_m": ofs, "pred_navd88_m": pred}, axis=1)
+    bias = recent_ofs_bias() if bias_correct else 0.0
+    df = pd.concat({"ofs_raw_m": ofs, "pred_navd88_m": pred}, axis=1)
+    df["ofs_bias_m"] = bias
+    df["ofs_navd88_m"] = df["ofs_raw_m"] - bias
     df["nontidal_m"] = df["ofs_navd88_m"] - df["pred_navd88_m"]
-    return df
+    return df[["ofs_raw_m", "ofs_bias_m", "ofs_navd88_m", "pred_navd88_m", "nontidal_m"]]
 
 
 def fetch_datums() -> dict[str, float]:

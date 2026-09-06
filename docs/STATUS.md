@@ -27,12 +27,17 @@ Updated: 2026-09-06
   Seed rule changed from MLLW to `SEED_ELEVATION_M = -1.0` because 3DEP
   hydro-flattens the bay at about -1.1 m NAVD88 (see config.py).
 
+- OFS bias check (2026-09-06, last 48 h): obs were +0.38 m above
+  predictions (real non-tidal water), OFS was +0.26 m above obs. So the
+  0.4-1.1 m OFS-minus-predictions gap was part weather, part model bias.
+  `fetch_forecast_frame` now subtracts the trailing 48 h mean OFS-obs bias
+  (columns ofs_raw_m / ofs_bias_m / ofs_navd88_m in water_levels.csv).
+
 ## Next
+- Re-run `python scripts/fetch_all.py` then `python scripts/build_hazard.py`
+  so hazard.csv uses the bias-corrected levels.
 - `data/water.gpkg` (OSM water features) had not downloaded yet when
   build_hazard ran, so near_inlet is all False. Re-run once it exists.
-- Run `python scripts/check_ofs_bias.py`: the OFS-minus-predictions
-  column was 0.4-1.1 m all day, which is either real weather or a datum
-  mismatch in the OFS product. Must be settled before Stage 9.
 - Stage 4-5: PostGIS schema + FastAPI endpoints.
 
 ## Notes
