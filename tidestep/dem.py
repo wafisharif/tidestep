@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,7 @@ from . import config
 
 IMAGE_SERVER = ("https://elevation.nationalmap.gov/arcgis/rest/services/"
                 "3DEPElevation/ImageServer/exportImage")
-MAX_PX = 4000
+MAX_PX = 2000   # the ImageServer 500s on larger requests under load
 DATA_DIR = Path(os.environ.get("TIDESTEP_DATA", "data"))
 
 
@@ -47,12 +48,20 @@ def _export_tile(bbox, width, height, out: Path) -> Path:
         "interpolation": "RSP_BilinearInterpolation",
         "f": "image",
     }
-    r = requests.get(IMAGE_SERVER, params=params, timeout=300)
-    r.raise_for_status()
-    if not r.content.startswith((b"II*\x00", b"MM\x00*")):
-        raise RuntimeError(f"3DEP did not return a TIFF: {r.text[:200]}")
-    out.write_bytes(r.content)
-    return out
+    last = None
+    for attempt in range(4):
+        try:
+            r = requests.get(IMAGE_SERVER, params=params, timeout=300)
+            r.raise_for_status()
+            if not r.content.startswith((b"II*\x00", b"MM\x00*")):
+                raise RuntimeError(f"3DEP did not return a TIFF: {r.text[:200]}")
+            out.write_bytes(r.content)
+            return out
+        except Exception as e:  # the ImageServer returns sporadic 500s
+            last = e
+            print(f"  3DEP tile {out.name} attempt {attempt+1} failed: {e}")
+            time.sleep(5 * (attempt + 1))
+    raise RuntimeError(f"3DEP export failed after retries: {last}")
 
 
 def fetch_dem(bbox=config.BBOX, resolution_m: float = 1.0,
