@@ -7,8 +7,10 @@ first in every session.
 ## Workflow rules
 - Work directly in this cloned repo. Never work in a copy.
 - `git pull --rebase` before starting anything.
-- After every finished stage or meaningful sub-step: commit with a clear message
-  and `git push` so the other teammate can see it.
+- Claude edits, creates and deletes files freely, but does NOT run git commit
+  or git push. When a stage or sub-step is ready, Claude gives the teammate
+  the exact `git add` / `git commit -m` / `git push` lines to run, so the
+  commits are authored by the teammate.
 - One stage per commit where possible; commit messages start with the stage
   number, e.g. `stage1: CO-OPS client + datum conversion`.
 - Keep `docs/STATUS.md` current: what is done, what is next, what is blocked.
