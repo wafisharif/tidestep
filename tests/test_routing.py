@@ -84,6 +84,19 @@ def test_route_window_never_unsafe(monkeypatch):
     assert win.baseline_length_m == 100
 
 
+def test_highway_set_handles_list_valued_tags():
+    """osmnx returns a list for `highway` when OSM tags a way with multiple
+    values (e.g. a simplified edge merging a residential stretch and a
+    driveway) instead of one string. edge_allowed must still work: a
+    vehicle is blocked only if EVERY value in the list is non-drivable."""
+    mixed = {"highway": ["residential", "footway"]}   # partly drivable
+    all_non_drivable = {"highway": ["footway", "path"]}
+    assert routing.edge_allowed("vehicle_small", mixed) is True
+    assert routing.edge_allowed("vehicle_small", all_non_drivable) is False
+    # pedestrian profiles are unaffected either way
+    assert routing.edge_allowed("child", all_non_drivable) is True
+
+
 def test_route_window_no_path_at_all(monkeypatch):
     """A profile with no possible path (flooding aside) is reported unsafe
     from hour 0, not silently treated as 'always safe'."""

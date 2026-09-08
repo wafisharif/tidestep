@@ -55,12 +55,6 @@ def segment_edges(edges: gpd.GeoDataFrame,
     return gdf.to_crs(4326)
 
 
-def _sample_points(line: LineString, spacing: float = 1.0) -> np.ndarray:
-    n = max(2, int(line.length / spacing) + 1)
-    d = np.linspace(0, line.length, n)
-    return np.array([line.interpolate(x).coords[0] for x in d])
-
-
 def sample_min_elevation(segments: gpd.GeoDataFrame, dem_path) -> pd.DataFrame:
     """Minimum DEM value (m NAVD88) along each segment and the DEM pixel
     (row, col) where it occurs. ground_m is NaN if the segment is off-DEM.

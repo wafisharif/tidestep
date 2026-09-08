@@ -33,6 +33,29 @@ from tidestep import dem as demmod  # noqa: E402
 DATA = demmod.DATA_DIR
 
 
+def sync_db(engine, segs, table, bias: float) -> None:
+    """Push this run's segments + hazard grid to PostGIS.
+
+    Segments are reloaded unconditionally on every run, not only when the
+    row count differs from what's already stored. A previous version of
+    this function only called ``db.load_segments`` when ``len(segs)`` had
+    changed, on the (false) assumption that segments are otherwise static
+    between runs. But a fix or correction to segments.gpkg that doesn't
+    change the segment *count* -- exactly what happened with the
+    near_inlet caching bug in scripts/build_hazard.py (see
+    docs/STATUS.md) -- would then never reach the live database: the
+    hourly loop would keep serving the stale row forever, silently,
+    because the count check always matched. Reloading is cheap (a few
+    thousand rows) next to the DEM/floodfill/network work this script
+    already does every hour, so there's no real cost to just always doing
+    it and being correct instead of "optimizing" against a case that
+    isn't actually expensive.
+    """
+    db.init_schema(engine)
+    db.load_segments(engine, segs)
+    db.load_hazard(engine, table, bias)
+
+
 def notify(contact: str, subject: str, body: str) -> None:
     host = os.environ.get("SMTP_HOST")
     if not host or "@" not in contact:
@@ -69,13 +92,7 @@ def main():
 
     # 3. store
     engine = db.get_engine()
-    db.init_schema(engine)
-    with engine.connect() as conn:
-        from sqlalchemy import text
-        n_seg = conn.execute(text("SELECT count(*) FROM segments")).scalar_one()
-    if n_seg != len(segs):
-        db.load_segments(engine, segs)
-    db.load_hazard(engine, table, bias)
+    sync_db(engine, segs, table, bias)
 
     # 4-5. saved routes: check the WHOLE 24 h window, not just right now, so
     # the alert can say *when* flooding starts ("floods at 4pm today")

@@ -39,3 +39,78 @@ def test_predictions_key():
 
 def test_empty_payload():
     assert coops.to_hourly_navd88(coops._to_series({"data": []}, "data")).empty
+
+
+class _FakeResponse:
+    """Minimal requests.Response stand-in for monkeypatching requests.get."""
+    def __init__(self, json_body):
+        self._json = json_body
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._json
+
+
+def test_get_raises_runtime_error_on_coops_error_body(monkeypatch):
+    """CO-OPS reports upstream problems (bad station, bad date range, etc.)
+    as HTTP 200 with an {"error": {...}} body, not an HTTP error status --
+    _get must not silently hand that back as if it were real data."""
+    monkeypatch.setattr(coops.requests, "get",
+                        lambda *a, **k: _FakeResponse({"error": {"message": "No data was found."}}))
+    with pytest.raises(RuntimeError, match="No data was found"):
+        coops._get({"product": "ofs_water_level"})
+
+
+def test_check_datums_passes_when_live_matches_config(monkeypatch):
+    live = {"MLLW": config.DATUMS_FT_STND["MLLW"],
+            "NAVD88": config.DATUMS_FT_STND["NAVD88"],
+            "MHHW": config.DATUMS_FT_STND["MHHW"]}
+    monkeypatch.setattr(coops, "fetch_datums", lambda: live)
+    assert coops.check_datums() is True
+
+
+def test_check_datums_raises_when_station_datum_sheet_changed(monkeypatch):
+    """NOAA periodically re-derives station datums from a new tidal epoch;
+    a stale hardcoded config.py would then silently mis-convert every water
+    level. check_datums exists specifically to catch that instead of
+    letting it fail silently downstream."""
+    drifted = dict(config.DATUMS_FT_STND)
+    drifted["NAVD88"] = config.DATUMS_FT_STND["NAVD88"] + 0.5   # well outside tolerance
+    monkeypatch.setattr(coops, "fetch_datums", lambda: drifted)
+    with pytest.raises(RuntimeError, match="NAVD88"):
+        coops.check_datums()
+
+
+def test_fetch_forecast_frame_bias_correction_math(monkeypatch):
+    """Pure arithmetic check of the bias-correction columns, independent of
+    any network call: ofs_navd88_m = ofs_raw_m - bias, and nontidal_m
+    (the wind/surge component) = ofs_navd88_m - pred_navd88_m."""
+    idx = pd.date_range("2026-09-06", periods=3, freq="1h", tz="UTC")
+    ofs = pd.Series([1.0, 1.2, 1.5], index=idx)
+    pred = pd.Series([0.8, 0.9, 1.0], index=idx)
+    monkeypatch.setattr(coops, "fetch_ofs_forecast", lambda start=None, hours=24: ofs)
+    monkeypatch.setattr(coops, "fetch_predictions", lambda start=None, hours=24: pred)
+    monkeypatch.setattr(coops, "recent_ofs_bias", lambda hours=48: 0.25)
+
+    df = coops.fetch_forecast_frame()
+    assert list(df["ofs_navd88_m"]) == pytest.approx([0.75, 0.95, 1.25])
+    assert list(df["nontidal_m"]) == pytest.approx([-0.05, 0.05, 0.25])
+    assert (df["ofs_bias_m"] == 0.25).all()
+
+
+def test_fetch_forecast_frame_bias_correct_false_skips_bias(monkeypatch):
+    idx = pd.date_range("2026-09-06", periods=2, freq="1h", tz="UTC")
+    ofs = pd.Series([1.0, 1.2], index=idx)
+    pred = pd.Series([0.8, 0.9], index=idx)
+    monkeypatch.setattr(coops, "fetch_ofs_forecast", lambda start=None, hours=24: ofs)
+    monkeypatch.setattr(coops, "fetch_predictions", lambda start=None, hours=24: pred)
+
+    def _boom(hours=48):
+        raise AssertionError("recent_ofs_bias should not be called when bias_correct=False")
+    monkeypatch.setattr(coops, "recent_ofs_bias", _boom)
+
+    df = coops.fetch_forecast_frame(bias_correct=False)
+    assert (df["ofs_bias_m"] == 0.0).all()
+    assert list(df["ofs_navd88_m"]) == pytest.approx([1.0, 1.2])

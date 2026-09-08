@@ -2,6 +2,61 @@
 
 Updated: 2026-09-08
 
+## Done (2026-09-08, fourth pass — second real bug found one layer above the
+first, dead code removed, coverage pushed from 74% to 95% on `tidestep/`)
+- **Second real bug, same failure class as the near_inlet fix, one layer
+  further downstream**: `scripts/hourly_update.py`'s `main()` only called
+  `db.load_segments` (the only thing that pushes segments.gpkg's actual
+  column values — near_inlet, ground_m, tags, geometry — into PostGIS)
+  when the segments table's row *count* differed from the freshly-read
+  `segments.gpkg`. A correction to segments.gpkg that doesn't change the
+  segment count — exactly what the near_inlet caching fix produces —
+  would then never reach the live database: the hourly cron loop would
+  keep serving the stale row forever, silently, because the count check
+  always matched. Concretely, this meant fixing `build_hazard.py` alone
+  was not enough to actually get corrected `near_inlet` flags live: the
+  operational loop would have swallowed the fix. Fixed by extracting
+  `sync_db()` and always reloading segments unconditionally (cheap next
+  to the DEM/floodfill/network work the script already does hourly).
+  Regression-tested in the new `tests/test_hourly_update.py` against a
+  real local Postgres, reproducing the exact same-count-different-value
+  scenario and confirming the reload now actually happens.
+- **Dead code removed**: `tidestep/segments.py`'s `_sample_points()` was
+  defined but never called anywhere (superseded by the inline sampling in
+  `sample_min_elevation`) — same class of leftover cruft as the
+  `dev_seed.py` fix in the previous pass. Removed.
+- **Coverage-driven gap found and closed**: `pytest --cov` showed
+  `routing.py`'s `_highway_set()` list/tuple branch (OSM sometimes tags a
+  simplified edge's `highway` with a list of values, not one string) was
+  never exercised — added `test_highway_set_handles_list_valued_tags`
+  confirming a vehicle is blocked only when *every* value in the list is
+  non-drivable. Also added 5 new `tidestep/coops.py` tests (all pure
+  monkeypatching, no network): the CO-OPS `{"error": ...}` response body
+  is correctly raised as `RuntimeError` rather than silently treated as
+  data, `check_datums()` genuinely catches a drifted station datum sheet
+  (and passes when it matches), and `fetch_forecast_frame`'s bias-
+  correction arithmetic (`ofs_navd88_m = ofs_raw_m - bias`,
+  `nontidal_m = ofs_navd88_m - pred_navd88_m`) is checked directly,
+  including that `bias_correct=False` genuinely skips the network call to
+  `recent_ofs_bias` rather than just ignoring its result.
+- **Net effect**: `tidestep/` package coverage 74% -> **95%**
+  (`pytest --cov=tidestep`); test count 74 -> **81** (28 -> 81 across this
+  and the previous two passes), still `pytest -q tests` runs the DB-free
+  majority with nothing running, and 81 (up from 75) pass against a real
+  local Postgres+PostGIS when one is reachable. Read `routing.py`, `api.py`,
+  `db.py`, `hazard.py`, `floodfill.py`, `segments.py`, `streets.py`,
+  `dem.py`, `coops.py`, `frontend/index.html`, `docker-compose.yml`,
+  `README.md`, `docs/LIMITATIONS.md` fresh, independent of the previous
+  passes' "confirmed correct" notes (which is exactly how the
+  hourly_update.py bug above was caught — the previous pass's read of
+  `db.py`/`api.py` alone wasn't enough to see a bug in how another script
+  *calls* them). Remaining uncovered lines are defensive edge-case guards
+  (empty/off-DEM/no-line-water-feature short-circuits) and one
+  effectively-unreachable `except NetworkXNoPath` branch in
+  `routing.Router.route()` (the baseline computation is strictly more
+  permissive than the primary route, so if the primary succeeds the
+  baseline provably cannot fail) — judged not worth contriving a test for.
+
 ## Done (2026-09-08, third pass — rigorous module-by-module audit against
 docs/PIPELINE.md, test coverage gap closed, live end-to-end verification)
 - **Read every remaining core module line by line against its pipeline
@@ -271,10 +326,16 @@ there today; nothing left is blocked on tooling)
    Claude sandbox still gets a proxy 403 to api.tidesandcurrents.noaa.gov).
    Paste the printed sensitivity/specificity into the submission's
    technical-challenges answer.
-3. Re-run `build_hazard.py` on the laptop's real data now that its
-   `near_inlet` caching bug is fixed (see above) — this is what actually
-   populates `near_inlet` for real segments now that `water.gpkg` exists;
-   simply re-running it before this fix would NOT have worked, silently.
+3. Re-run `build_hazard.py` **and then `load_db.py` (or restart
+   `hourly_update.py`'s cron loop, now that its own reload bug is fixed)**
+   on the laptop's real data — this is what actually gets corrected
+   `near_inlet` flags into the *live* database. Both halves of this used
+   to be silently broken: `build_hazard.py` alone wouldn't have recomputed
+   the flag (fixed last pass), and even after that fix, `hourly_update.py`
+   alone wouldn't have pushed a same-row-count correction into Postgres
+   (fixed this pass). Re-running just one of the two would not have been
+   enough — worth doing deliberately now that both are fixed, not just
+   trusting "it'll pick it up on the next cron tick."
 4. Record demo footage: the time slider across a real flood cycle, then
    the profile switch showing the same trip flood-blind vs. flood-aware
    for adult vs. vehicle. The app is confirmed running end to end on real
@@ -286,38 +347,44 @@ there today; nothing left is blocked on tooling)
    Claude sandbox can run a Swift toolchain. This is the single biggest
    unverified risk left in the project.
 
-Test coverage gap (previously item 5 here) is **done** — see the top
-section: `test_dem.py`, `test_streets.py`, `test_segments.py`, `test_db.py`,
-`test_api.py`, `test_build_hazard_script.py` all added and passing, 74
-tests total.
+Test coverage gap (previously item 5 here) is **done** — see the top two
+sections: `test_dem.py`, `test_streets.py`, `test_segments.py`, `test_db.py`,
+`test_api.py`, `test_build_hazard_script.py`, `test_hourly_update.py` all
+added and passing; `tidestep/` package coverage is 95% (`pytest --cov`).
 
 ## Uncommitted work
-Everything from this session and the previous one is still sitting
+Everything from this session and the previous ones is still sitting
 uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
-see `CLAUDE.md`). `scripts/hourly_update.py`, `docs/LIMITATIONS.md`, and
-`docs/STATUS.md` from the last audit pass are already committed and pushed
-(`8d779c6`, confirmed via `git log origin/main`). Still uncommitted:
-- Modified: `README.md`, `tests/test_routing.py`, `tidestep/api.py`,
-  `tidestep/db.py`, `tidestep/routing.py`, `scripts/build_hazard.py`
-  (this pass's near_inlet fix), `scripts/dev_seed.py` (dead-code cleanup),
-  `docs/STATUS.md` (this pass).
+see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
+`docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
+committed and pushed (`8d779c6`, confirmed via `git log origin/main`) —
+`scripts/hourly_update.py` has since been modified again this pass (the
+sync_db fix, on top of the already-pushed strftime fix). Still uncommitted:
+- Modified: `README.md`, `tests/test_routing.py`, `tests/test_coops.py`,
+  `tidestep/api.py`, `tidestep/db.py`, `tidestep/routing.py`,
+  `tidestep/segments.py` (dead `_sample_points` removed), `scripts/build_hazard.py`
+  (near_inlet caching fix), `scripts/hourly_update.py` (this pass's sync_db
+  fix, on top of the already-pushed strftime fix), `docs/STATUS.md` (this
+  pass), `docs/LIMITATIONS.md` (earlier pass, still uncommitted).
 - New: `docs/NOVELTY.md`, `ios/`, `requirements-dev.txt`,
   `scripts/dev_seed.py`, `scripts/validate_stage9.py`, `tidestep/validate.py`,
   `tests/test_dev_seed.py`, `tests/test_integration.py`, `tests/test_validate.py`,
   `tests/test_dem.py`, `tests/test_streets.py`, `tests/test_segments.py`,
-  `tests/test_db.py`, `tests/test_api.py`, `tests/test_build_hazard_script.py`.
+  `tests/test_db.py`, `tests/test_api.py`, `tests/test_build_hazard_script.py`,
+  `tests/test_hourly_update.py` (this pass).
 
 Suggested split, each buildable in one `git add` + `git commit`:
-1. `docs/STATUS.md docs/NOVELTY.md README.md` — docs.
+1. `docs/STATUS.md docs/NOVELTY.md docs/LIMITATIONS.md README.md` — docs.
 2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests
    (predictive alerting, dev_seed fixture, validate.py, api/db hardening,
-   the near_inlet caching fix, the new test files).
+   the near_inlet caching fix, the hourly_update.py sync_db fix, the new
+   test files).
 3. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
    compiler.
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "audit: fix near_inlet caching bug, add test_dem/streets/segments/db/api (28->74 tests)"
+git commit -m "audit: fix hourly_update.py segment-reload bug, remove dead code, 74->81 tests (95% tidestep/ coverage)"
 git push
 ```
 
