@@ -2,6 +2,65 @@
 
 Updated: 2026-09-08
 
+## Done (2026-09-08, third pass — rigorous module-by-module audit against
+docs/PIPELINE.md, test coverage gap closed, live end-to-end verification)
+- **Read every remaining core module line by line against its pipeline
+  stage** (`coops.py` vs Stage 1, `dem.py`/`streets.py` vs Stage 1,
+  `segments.py`/`floodfill.py` vs Stage 2, `hazard.py`/`config.py` vs
+  Stage 3, `db.py` vs Stage 4, and all four orchestration scripts) — the
+  parts of the codebase the previous audit pass hadn't gotten to yet.
+  Confirmed correct: datum conversion, OFS bias correction, DEM tiling and
+  merge, `retain_all=True` bbox handling, the connected-flood-fill
+  algorithm, the near-inlet stricter-threshold direction, the PostGIS
+  schema and every query (including the profile-name SQL-injection guard
+  in `unsafe_edges`), and the lat/lon argument order through
+  `api.py -> db.py -> PostGIS` for saved routes.
+- **Real bug found and fixed**: `scripts/build_hazard.py` cached
+  `data/segments.gpkg` (expensive: DEM sampling) and, whenever that file
+  already existed, silently skipped recomputing `near_inlet` — a cheap
+  spatial join against `data/water.gpkg` that has nothing to do with why
+  the file is cached. Concretely: the laptop's `segments.gpkg` was built
+  before `water.gpkg` existed, with `near_inlet` all `False`; simply
+  re-running `build_hazard.py` after fetching `water.gpkg` — which is
+  exactly what the previous version of this file's "Next" section told the
+  user to do — would silently keep every segment marked "not near an
+  inlet" forever. Fixed by extracting a `refresh_near_inlet()` helper that
+  always recomputes the flag and only rewrites the cache file when it
+  actually changes; regression-tested in `tests/test_build_hazard_script.py`
+  against exactly this stale-cache scenario.
+- **Dead code removed**: `scripts/dev_seed.py`'s `synthetic_tide()`
+  computed a tide curve, then immediately discarded it and computed a
+  second, different one that was actually used — the first computation was
+  leftover cruft from an earlier iteration. Removed; verified via the full
+  `dev_seed.py` run below that the actual (second) curve is unchanged.
+- **Test coverage gap fully closed.** Six new test files, all passing:
+  `test_dem.py` (DEM tiling/merge math, exercised for real by monkeypatching
+  only the network call), `test_streets.py` (bbox ordering, the osmnx-2.x
+  `osmid` rename, graph/water caching), `test_segments.py` (line-splitting
+  edge cases, OSM tag normalization), `test_db.py` (schema, round-trips,
+  `unsafe_edges`' injection guard, `edge_hazard`'s aggregation, saved-route
+  CRUD — against a real local PostGIS), `test_api.py` (every request-
+  validation rejection path — malformed bbox, out-of-range hour, unknown
+  profile — confirmed to never touch the database at all), and
+  `test_build_hazard_script.py` (the near_inlet regression above). Test
+  count: **28 -> 74**, all passing, `pytest -q tests` still needs nothing
+  running for the majority of them (only `test_db.py`/`test_integration.py`
+  need a reachable Postgres, and skip cleanly without one).
+- **Live end-to-end verification, not just tests**: got a local Postgres +
+  PostGIS running directly in this Claude sandbox (the `postgresql`/`postgis`
+  packages were already installed; `docker`'s daemon isn't startable here,
+  so this bypassed Docker entirely), ran the complete test suite against it
+  (74 passed), ran `python scripts/dev_seed.py` end to end, then actually
+  booted `uvicorn tidestep.api:app` as a live server and hit it with `curl`
+  — confirmed `/api/hours` returns 24 hours, `/api/route` returns a real
+  route for `adult` at the synthetic peak hour and correctly returns
+  "no safe route at this hour" for `vehicle_small` at the same hour/trip,
+  and `/` serves the frontend with a 200. This sandbox still cannot reach
+  NOAA (`curl` to `api.tidesandcurrents.noaa.gov` gets a proxy 403, as
+  documented in `CLAUDE.md`), so Stage 9 validation and real-data fetches
+  are still laptop-only — but everything downstream of a fetch has now been
+  verified live, not just read and reasoned about.
+
 ## Done (2026-09-08 — laptop set up for real, first real data + two bugs found)
 - **The laptop is now a fully working dev environment.** In order, fixed:
   a `.git/index.lock` left over from a bad shutdown, a README that only
@@ -208,43 +267,57 @@ there today; nothing left is blocked on tooling)
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
-   real, which the laptop can now do. Paste the printed
-   sensitivity/specificity into the submission's technical-challenges
-   answer.
-3. Spot-check `near_inlet` on the real data now that `water.gpkg` actually
-   exists from the fetch above (it was all `False` on every prior run
-   because the water layer hadn't been fetched yet).
+   real, which the laptop can now do (confirmed again this pass: this
+   Claude sandbox still gets a proxy 403 to api.tidesandcurrents.noaa.gov).
+   Paste the printed sensitivity/specificity into the submission's
+   technical-challenges answer.
+3. Re-run `build_hazard.py` on the laptop's real data now that its
+   `near_inlet` caching bug is fixed (see above) — this is what actually
+   populates `near_inlet` for real segments now that `water.gpkg` exists;
+   simply re-running it before this fix would NOT have worked, silently.
 4. Record demo footage: the time slider across a real flood cycle, then
    the profile switch showing the same trip flood-blind vs. flood-aware
    for adult vs. vehicle. The app is confirmed running end to end on real
-   data, so this is unblocked.
-5. Test coverage gap: there's no dedicated `test_api.py` / `test_db.py` /
-   `test_dem.py` / `test_streets.py` / `test_segments.py` — `test_integration.py`
-   and `test_floodmodel.py` cover much of this indirectly but not as unit
-   tests per module.
-6. iOS app: see `ios/README.md` — Swift source is written, reviewed line
+   data (and, this pass, on a live local server hit with real HTTP
+   requests), so this is unblocked.
+5. iOS app: see `ios/README.md` — Swift source is written, reviewed line
    by line against the real API/DB response shapes, and ready to open in
    Xcode, but has never actually compiled — needs a Mac, since neither
    Claude sandbox can run a Swift toolchain. This is the single biggest
    unverified risk left in the project.
 
+Test coverage gap (previously item 5 here) is **done** — see the top
+section: `test_dem.py`, `test_streets.py`, `test_segments.py`, `test_db.py`,
+`test_api.py`, `test_build_hazard_script.py` all added and passing, 74
+tests total.
+
 ## Uncommitted work
 Everything from this session and the previous one is still sitting
 uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
-see `CLAUDE.md`). Current diff is 7 modified + 9 new files/dirs from
-earlier, plus `scripts/hourly_update.py`, `docs/LIMITATIONS.md`, and this
-file from the audit pass just now. Suggested split, each buildable in one
-`git add` + `git commit`:
-1. `docs/STATUS.md docs/LIMITATIONS.md docs/NOVELTY.md README.md` — docs.
+see `CLAUDE.md`). `scripts/hourly_update.py`, `docs/LIMITATIONS.md`, and
+`docs/STATUS.md` from the last audit pass are already committed and pushed
+(`8d779c6`, confirmed via `git log origin/main`). Still uncommitted:
+- Modified: `README.md`, `tests/test_routing.py`, `tidestep/api.py`,
+  `tidestep/db.py`, `tidestep/routing.py`, `scripts/build_hazard.py`
+  (this pass's near_inlet fix), `scripts/dev_seed.py` (dead-code cleanup),
+  `docs/STATUS.md` (this pass).
+- New: `docs/NOVELTY.md`, `ios/`, `requirements-dev.txt`,
+  `scripts/dev_seed.py`, `scripts/validate_stage9.py`, `tidestep/validate.py`,
+  `tests/test_dev_seed.py`, `tests/test_integration.py`, `tests/test_validate.py`,
+  `tests/test_dem.py`, `tests/test_streets.py`, `tests/test_segments.py`,
+  `tests/test_db.py`, `tests/test_api.py`, `tests/test_build_hazard_script.py`.
+
+Suggested split, each buildable in one `git add` + `git commit`:
+1. `docs/STATUS.md docs/NOVELTY.md README.md` — docs.
 2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests
-   (predictive alerting, dev_seed fixture, validate.py, the Windows
-   strftime fix, api/db hardening).
+   (predictive alerting, dev_seed fixture, validate.py, api/db hardening,
+   the near_inlet caching fix, the new test files).
 3. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
    compiler.
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "stage 8-10: predictive alerts, dev_seed + integration tests, Stage 9 validation, iOS client, Windows fixes"
+git commit -m "audit: fix near_inlet caching bug, add test_dem/streets/segments/db/api (28->74 tests)"
 git push
 ```
 

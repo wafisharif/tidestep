@@ -107,7 +107,6 @@ def synthetic_tide(hours: int = 24) -> pd.Series:
     """A plausible 24 h semidiurnal-ish tide: two highs, peak at hour 9
     reaching 1.0 m NAVD88 (floods Shore Rd + Cove Rd but not Basin Rd)."""
     t = np.arange(hours)
-    wl = 0.35 + 0.65 * np.sin(2 * np.pi * (t - 3) / 12.42) ** 2 * np.exp(-((t - 9) ** 2) / 60)
     wl = 0.2 + 0.6 * (0.5 - 0.5 * np.cos(2 * np.pi * t / 12.42)) \
         + 0.35 * np.exp(-((t - 9) ** 2) / 8)   # extra surge bump at hour 9
     idx = pd.date_range("2026-09-07", periods=hours, freq="h", tz="UTC")

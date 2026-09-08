@@ -11,11 +11,37 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 
 from tidestep import dem as demmod, floodfill, hazard, segments, streets  # noqa: E402
 
 DATA = demmod.DATA_DIR
+
+
+def refresh_near_inlet(segs: gpd.GeoDataFrame, water, seg_path: Path) -> gpd.GeoDataFrame:
+    """Recompute ``near_inlet`` against the current ``water`` layer and
+    rewrite ``seg_path`` only if the flags actually changed.
+
+    near_inlet is a cheap spatial join against water.gpkg (unlike the DEM
+    sampling that produces the rest of ``segs``, which is why segments.gpkg
+    is cached at all — see the caller). Recomputing it every run, rather
+    than trusting whatever is already in a cached segments.gpkg, matters
+    concretely: a segments.gpkg built before water.gpkg existed (the common
+    first-run case) would otherwise keep every segment marked "not near an
+    inlet" forever, even after a later fetch_all.py run brings water.gpkg
+    in — silently, since nothing errors, the map just quietly never shows
+    the stricter inlet threshold anywhere. Only rewriting the file when the
+    flags actually change keeps a normal re-run with unchanged inputs from
+    doing pointless disk I/O.
+    """
+    new_near_inlet = hazard.flag_near_inlet(segs, water)
+    if "near_inlet" not in segs.columns or not np.array_equal(
+            segs["near_inlet"].to_numpy(dtype=bool), new_near_inlet):
+        segs = segs.copy()
+        segs["near_inlet"] = new_near_inlet
+        segs.to_file(seg_path, driver="GPKG")
+    return segs
 
 
 def main():
@@ -36,8 +62,7 @@ def main():
         segs = gpd.read_file(seg_path)
     else:
         segs = segments.build_segments(edges, dem_path)
-        segs["near_inlet"] = hazard.flag_near_inlet(segs, water)
-        segs.to_file(seg_path, driver="GPKG")
+    segs = refresh_near_inlet(segs, water, seg_path)
     n_off = segs["ground_m"].isna().sum()
     print(f"{len(segs)} segments, {n_off} off-DEM, {segs['near_inlet'].sum()} near inlet "
           f"({time.time()-t0:.0f}s)")
