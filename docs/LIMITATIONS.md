@@ -62,10 +62,18 @@ notice. Each one is also called out in the module it applies to.
 
 - **Delivery is email only** (`scripts/hourly_update.py`); SMS/native push
   are 2.0 items, not implemented.
-- **A route is marked "blocked" using the flood-avoiding router's baseline
-  comparison at hour 0 only** — it does not yet warn ahead of time that a
-  currently-clear route will flood later in the 24 h window unless the
-  hourly cron happens to catch it after the crossing.
+- **No authentication on `/api/routes`.** Saving, listing, and deleting a
+  saved route requires no login — anyone with the API URL can see or
+  delete anyone else's saved route. Acceptable for a single-user demo
+  scope; a real multi-user deployment would need per-user accounts before
+  this endpoint could be opened up publicly.
+
+Superseded (kept here as a record, not a current gap): earlier builds
+checked a saved route against forecast_hour=0 only, so an alert could only
+fire once flooding had already started. `Router.route_window()` +
+`scripts/hourly_update.py` now scan the whole 24 h forecast window per
+saved route and report the first hour the usual path becomes unsafe, so an
+alert can read "floods starting around 4:00 PM today" ahead of time.
 
 ## Validation
 

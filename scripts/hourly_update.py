@@ -101,7 +101,11 @@ def main():
                         f"{wl.ofs_navd88_m.iloc[0]:.2f} m NAVD88 at Kings Point). "
                         f"Check the app for a safe detour.")
             else:
-                when = valid_times[win.first_unsafe_hour].strftime("%-I:%M %p %Z")
+                # %-I (no leading zero) is a glibc/macOS strftime extension;
+                # it raises ValueError on Windows. lstrip("0") on the
+                # zero-padded %I is the portable equivalent (safe here since
+                # %I is always 01-12, never "00").
+                when = valid_times[win.first_unsafe_hour].strftime("%I:%M %p %Z").lstrip("0")
                 body = (f"TideStep: the usual path for {label} is on track to flood "
                         f"starting around {when} today (up to {win.max_depth_cm} cm). "
                         f"It is still clear right now — plan ahead or check the app "

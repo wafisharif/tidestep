@@ -1,10 +1,56 @@
 # Status
 
-Updated: 2026-09-07
+Updated: 2026-09-08
 
-## Done (this session — code + repo hygiene, no data refetch: no NOAA/USGS/
-Overpass egress from either Claude sandbox used, same restriction the
-laptop sandbox already documented)
+## Done (2026-09-08 — laptop set up for real, first real data + two bugs found)
+- **The laptop is now a fully working dev environment.** In order, fixed:
+  a `.git/index.lock` left over from a bad shutdown, a README that only
+  documented Unix venv activation (now has a separate Windows PowerShell
+  block + troubleshooting section), `.venv` built against a too-old Python
+  (3.10.11 — below the 3.11+ `requirements.txt` needs) rebuilt with
+  `py -3.12 -m venv .venv`, and Docker Desktop installed but never launched.
+  `pip install -r requirements.txt` now succeeds with real Windows wheels
+  for every package.
+- **Real data fetched for the first time on the corrected bbox**:
+  `python scripts/fetch_all.py` and `python scripts/build_hazard.py` both
+  ran against live NOAA/USGS/Overpass from the laptop (neither Claude
+  sandbox has that egress). `docker compose up -d` + `python
+  scripts/load_db.py` loaded it into PostGIS, and `uvicorn
+  tidestep.api:app --reload` started cleanly ("Application startup
+  complete") — the full pipeline has now genuinely run end to end on real
+  data, not just against `dev_seed.py`'s synthetic fixture.
+- **Bug fix, found by rigorous line-by-line audit, not by running it**:
+  `scripts/hourly_update.py`'s predictive-alert message used
+  `strftime("%-I:%M %p %Z")` — `%-I` is a glibc/macOS-only strftime
+  extension and raises `ValueError` on Windows. Since the user runs
+  `hourly_update.py` directly on Windows (it's not in the Docker
+  container — only Postgres is), this would have crashed the first time a
+  real predictive alert fired (`first_unsafe_hour > 0`), silently killing
+  the app's most novel feature. Fixed with the portable equivalent:
+  `strftime("%I:%M %p %Z").lstrip("0")`. Confirmed via
+  `grep -rn "%-[A-Za-z]"` that this was the only `%-`-style format code
+  anywhere in the repo.
+- **Docs fix**: `docs/LIMITATIONS.md`'s "Alerts" section still described
+  the pre-`route_window()` behavior (checked forecast_hour=0 only) as a
+  current limitation, contradicting the predictive-alerting feature that
+  had already superseded it earlier in the session. Rewrote it as a
+  superseded note and added a new, real, previously-undocumented gap found
+  in the same audit: **no authentication on `/api/routes`** — anyone with
+  the API URL can view or delete any saved route. Fine for a single-user
+  demo, would need accounts before a real multi-user deployment.
+- **Full-repo audit, everything else reviewed and confirmed correct, no
+  further bugs found**: `tidestep/api.py`, `tidestep/routing.py`,
+  `tidestep/config.py`, `docker-compose.yml`, `tidestep/validate.py`,
+  `frontend/index.html`, and all 9 iOS Swift files — including a line-by-
+  line cross-check of every Swift `Codable` struct's JSON field names
+  against the actual Python API/DB response shapes (`Models.swift` vs.
+  `api.py`/`db.py`). No mismatches found. (Caveat, unchanged: this is
+  correctness-by-inspection only — neither Claude sandbox has a Swift
+  toolchain, so the iOS app has still never actually compiled.)
+
+## Done (earlier this session — code + repo hygiene, no data refetch: no
+NOAA/USGS/Overpass egress from either Claude sandbox used, same restriction
+the laptop sandbox already documented at the time)
 - Repo hygiene: `cache/` untracked and gitignored (was accidentally
   committed, ~9.4 MB of regeneratable Overpass cache), `requirements.txt`
   pinned to exact versions the full test suite passed against,
@@ -154,26 +200,53 @@ default largest-component filter silently dropped the entire west shore
 fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
 (about 150 MB); build_hazard should take about a minute.
 
-## Next (needs a normal terminal with NOAA/USGS/Overpass network + Docker —
-not available in either Claude sandbox used this session)
-1. `git pull`, then `docker compose up -d`.
-2. Regenerate data with the corrected bbox: delete `data/dem_1m.tif`,
-   `data/streets.graphml`, `data/water.gpkg`, `data/segments.gpkg`, then
-   `python scripts/fetch_all.py && python scripts/build_hazard.py && python
-   scripts/load_db.py`. This is also what finally populates `near_inlet`
-   for real (it was all False last run because `water.gpkg` didn't exist
-   yet).
-3. `python scripts/validate_stage9.py --days 30` — the logic is tested and
-   ready, this just needs to actually hit NOAA. Paste the printed
+## Next (the laptop is now a working environment — these are all runnable
+there today; nothing left is blocked on tooling)
+1. **Commit and push.** Nothing described in this file or in `git status`
+   is on `origin/main` yet — see "Uncommitted work" below for the exact
+   commands. Do this first so the fixes above aren't sitting only on disk.
+2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
+   actually been run anywhere. The logic is unit-tested and ready
+   (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
+   real, which the laptop can now do. Paste the printed
    sensitivity/specificity into the submission's technical-challenges
    answer.
-4. Run the app for real (`uvicorn tidestep.api:app --reload`) and record
-   demo footage: the time slider across a real flood cycle, then the
-   profile switch showing the same trip flood-blind vs. flood-aware for
-   adult vs. vehicle.
-5. iOS app: see ios/README.md — Swift source is written and ready to open
-   in Xcode; needs a Mac to build/run since neither Claude sandbox can
-   compile Swift/SwiftUI.
+3. Spot-check `near_inlet` on the real data now that `water.gpkg` actually
+   exists from the fetch above (it was all `False` on every prior run
+   because the water layer hadn't been fetched yet).
+4. Record demo footage: the time slider across a real flood cycle, then
+   the profile switch showing the same trip flood-blind vs. flood-aware
+   for adult vs. vehicle. The app is confirmed running end to end on real
+   data, so this is unblocked.
+5. Test coverage gap: there's no dedicated `test_api.py` / `test_db.py` /
+   `test_dem.py` / `test_streets.py` / `test_segments.py` — `test_integration.py`
+   and `test_floodmodel.py` cover much of this indirectly but not as unit
+   tests per module.
+6. iOS app: see `ios/README.md` — Swift source is written, reviewed line
+   by line against the real API/DB response shapes, and ready to open in
+   Xcode, but has never actually compiled — needs a Mac, since neither
+   Claude sandbox can run a Swift toolchain. This is the single biggest
+   unverified risk left in the project.
+
+## Uncommitted work
+Everything from this session and the previous one is still sitting
+uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
+see `CLAUDE.md`). Current diff is 7 modified + 9 new files/dirs from
+earlier, plus `scripts/hourly_update.py`, `docs/LIMITATIONS.md`, and this
+file from the audit pass just now. Suggested split, each buildable in one
+`git add` + `git commit`:
+1. `docs/STATUS.md docs/LIMITATIONS.md docs/NOVELTY.md README.md` — docs.
+2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests
+   (predictive alerting, dev_seed fixture, validate.py, the Windows
+   strftime fix, api/db hardening).
+3. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
+   compiler.
+Or, more simply, one commit for everything:
+```
+git add -A
+git commit -m "stage 8-10: predictive alerts, dev_seed + integration tests, Stage 9 validation, iOS client, Windows fixes"
+git push
+```
 
 ## Notes
 - `ofs_water_level` returns 6-minute data; we take the hourly max.
