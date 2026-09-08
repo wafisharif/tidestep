@@ -1,0 +1,6 @@
+# Test-only dependencies, on top of requirements.txt.
+# tests/test_integration.py drives the real FastAPI app with TestClient,
+# which needs httpx; the rest of the suite only needs pytest.
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1

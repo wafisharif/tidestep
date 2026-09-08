@@ -77,8 +77,11 @@ def get_hours():
                        "water_level_m": r[2], "flooded_segments": r[3]} for r in rows]}
 
 
+MAX_HOUR = config.FORECAST_HOURS - 1  # bound the ?hour= param to what the model actually forecasts
+
+
 @app.get("/api/risk")
-def get_risk(hour: int = Query(0, ge=0, le=48), bbox: str | None = None):
+def get_risk(hour: int = Query(0, ge=0, le=MAX_HOUR), bbox: str | None = None):
     box = None
     if bbox:
         try:
@@ -91,7 +94,7 @@ def get_risk(hour: int = Query(0, ge=0, le=48), bbox: str | None = None):
 
 @app.get("/api/route")
 def get_route(olat: float, olon: float, dlat: float, dlon: float,
-              profile: str = "adult", hour: int = Query(0, ge=0, le=48)):
+              profile: str = "adult", hour: int = Query(0, ge=0, le=MAX_HOUR)):
     if profile not in hazard.PROFILES:
         raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
     res = router().route((olat, olon), (dlat, dlon), profile, hour)

@@ -20,6 +20,8 @@ import geopandas as gpd
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+from . import config
+
 DEFAULT_URL = "postgresql+psycopg://tidestep:tidestep@localhost:5432/tidestep"
 
 
@@ -157,7 +159,15 @@ def risk_geojson(engine, forecast_hour: int, bbox=None) -> dict:
 
 def unsafe_edges(engine, forecast_hour: int, profile: str) -> set[tuple]:
     """(u, v, key) of every graph edge that has at least one unsafe segment
-    for ``profile`` at ``forecast_hour``. Used by the router."""
+    for ``profile`` at ``forecast_hour``. Used by the router.
+
+    ``profile`` is checked against the fixed set of known profiles before
+    being interpolated into the column name below: the API layer already
+    validates it against ``hazard.PROFILES``, but this is the actual SQL
+    boundary, so it re-checks rather than trusting the caller.
+    """
+    if profile not in config.DEPTH_LIMIT_M:
+        raise ValueError(f"unknown profile {profile!r}")
     col = f"safe_{profile}"
     sql = f"""
     SELECT DISTINCT s.u, s.v, s.key FROM segments s JOIN hazard h USING (segment_id)

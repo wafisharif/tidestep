@@ -77,21 +77,35 @@ def main():
         db.load_segments(engine, segs)
     db.load_hazard(engine, table, bias)
 
-    # 4-5. saved routes: blocked = no safe route at any of the next 24 h, or
-    # the flood-blind route crosses unsafe water at departure hour 0
+    # 4-5. saved routes: check the WHOLE 24 h window, not just right now, so
+    # the alert can say *when* flooding starts ("floods at 4pm today")
+    # instead of only firing once it has already happened. This was the
+    # stated intent in the comment above (previously the code only checked
+    # forecast_hour=0) — see docs/STATUS.md.
     R = routing.Router(ox.load_graphml(streets.GRAPH_PATH), engine)
+    hours = range(len(wl))
+    valid_times = list(wl.index)
     for r in db.list_saved_routes(engine):
-        res = R.route((r["olat"], r["olon"]), (r["dlat"], r["dlon"]), r["profile"], 0)
-        blocked = res is None or res.baseline_blocked
+        win = R.route_window((r["olat"], r["olon"]), (r["dlat"], r["dlon"]),
+                             r["profile"], hours)
+        blocked = win.first_unsafe_hour is not None
         if blocked and not r["last_blocked"]:
             label = r["label"] or "your saved route"
-            if res is None:
-                body = (f"TideStep: {label} has no safe {r['profile']} route right now "
-                        f"(water level {wl.ofs_navd88_m.iloc[0]:.2f} m NAVD88 at Kings Point).")
+            if win.baseline_length_m is None:
+                body = (f"TideStep: {label} has no safe {r['profile']} route between "
+                        f"these points at all, flooding aside — check the app for a "
+                        f"different start/end point.")
+            elif win.first_unsafe_hour == 0:
+                body = (f"TideStep: the usual path for {label} is flooded right now "
+                        f"(up to {win.max_depth_cm} cm, water level "
+                        f"{wl.ofs_navd88_m.iloc[0]:.2f} m NAVD88 at Kings Point). "
+                        f"Check the app for a safe detour.")
             else:
-                body = (f"TideStep: the usual path for {label} crosses flooded street segments "
-                        f"(up to {res.max_depth_cm_on_route} cm). A detour of "
-                        f"{res.length_m/1000:.2f} km is available in the app.")
+                when = valid_times[win.first_unsafe_hour].strftime("%-I:%M %p %Z")
+                body = (f"TideStep: the usual path for {label} is on track to flood "
+                        f"starting around {when} today (up to {win.max_depth_cm} cm). "
+                        f"It is still clear right now — plan ahead or check the app "
+                        f"for a detour before then.")
             notify(r["contact"], "TideStep flood alert", body)
         db.update_route_state(engine, r["route_id"], blocked)
 
