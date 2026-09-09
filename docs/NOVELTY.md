@@ -11,11 +11,12 @@ file says so rather than guessing.
 
 Most flood apps answer "how bad could it get" for a river reach or a whole
 county. TideStep answers "will *this specific street* be underwater at
-*this specific hour*" — turning a regional hazard forecast into a street-level,
-per-person, time-stamped decision, tied to routing you'd actually use to
-get somewhere. That shift — hazard map to decision tool — is where the
-novelty lives, and it's a pattern that shows up across the CAC winners
-judges have already rewarded (below).
+*this specific hour*, and is it safe for *this specific person* to be on
+it" — turning a regional hazard forecast into a street-level, per-person,
+time-stamped decision, tied to routing you'd actually use to get somewhere.
+That shift — hazard map to decision tool — is where the novelty lives, and
+it's a pattern that shows up across the CAC winners judges have already
+rewarded (below).
 
 ## Head-to-head with the closest existing entries
 
@@ -71,7 +72,7 @@ someone deciding whether to drive down Cove Road. Watershape teaches how
 floods work; TideStep tells you if the flood is happening under your feet
 this afternoon.
 
-### RoadWatch — Vaiibhav Sitaraman & Eric Dai, NJ-06, 2025 special-category winner
+### RoadWatch — Vaibhav Sitaraman & Eric Dai, NJ-06, 2025 special-category winner
 
 RoadWatch uses AI-powered dashcams to detect and report road hazards
 (potholes, broken streetlights) after the fact, for municipal repair
@@ -141,6 +142,27 @@ tool nobody had packaged this way for this problem.
    web frontend and the native SwiftUI iOS app (`ios/`) — same hazard
    colors, same routing logic, same data, two real clients, not a web demo
    with an iOS mockup bolted on.
+6. **Time-expanded routing, not a static-weight shortcut.** Nearly every
+   flood-routing demo (including TideStep's own first version) checks
+   hazard once at departure and calls it done — reasonable when a trip is
+   short, wrong in general, because a segment 20 minutes into a walk is
+   flooded or not based on the tide an hour later, not the tide when you
+   left. `Router.route_time_aware()` (`tidestep/routing.py`) is a real
+   time-expanded Dijkstra: it converts trip progress into elapsed time
+   using per-profile walking speed or the street graph's actual posted-
+   speed travel times, and re-checks the hazard table at the forecast
+   hour a traveler would truly be on each segment. This is proven, not
+   just claimed — `tests/test_routing.py` builds a synthetic detour graph
+   where a hazard appears only after the direct path's normal travel
+   time, showing the old departure-hour router gives an unsafe answer and
+   the new one gives the correct one.
+7. **"When is it safe to make this specific trip today," not just "is it
+   safe right now."** The new `/api/route/advisory` endpoint
+   (`Router.route_advisory()`) reports safe/unsafe for a given trip across
+   the *entire* 24 h forecast window in one call, rendered in the
+   frontend as a 24-cell hour strip — turning "check the map at noon,
+   check it again at 6" into a single glance answering "when today can I
+   make this trip."
 
 ## What TideStep does *not* claim
 

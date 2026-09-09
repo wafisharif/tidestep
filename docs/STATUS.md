@@ -1,6 +1,100 @@
 # Status
 
-Updated: 2026-09-08
+Updated: 2026-09-09
+
+## Done (2026-09-09, fifth pass — genuinely new feature work, not just
+audit/bugfix: time-expanded routing + trip advisory)
+
+This pass was deliberately different in kind from the previous four: those
+were audits (real bugs found and fixed, coverage raised, no new user-facing
+capability). This one retires an explicitly-documented Stage 6
+simplification with a real algorithmic upgrade and adds a new endpoint,
+without touching any previously-tested code path.
+
+- **Time-expanded (arrival-hour-aware) routing — `Router.route_time_aware()`**
+  (`tidestep/routing.py`). Until now, every route TideStep computed checked
+  the hazard table once, at the hour the trip departs, and assumed that
+  hazard state held for the whole trip — explicitly called out as a known
+  simplification in `docs/LIMITATIONS.md`. For a walk or drive that's long
+  enough to cross into the next forecast hour, that's wrong: a segment 20
+  minutes into the trip is flooded or not based on the tide an hour later,
+  not the tide when the traveler left home. `route_time_aware()` is a
+  hand-rolled Dijkstra over `(elapsed_seconds, node)` state (not expressible
+  as a static per-edge weight, so it can't reuse `networkx.dijkstra`): it
+  converts each edge's length into actual time-on-segment (new
+  `config.WALK_SPEED_MPS` for pedestrians; the vehicle profiles reuse
+  osmnx's existing posted-speed-limit `travel_time`), tracks cumulative
+  elapsed time along each candidate path, and checks the hazard state at
+  the forecast hour a traveler would *actually* be on each segment,
+  clamped to `config.MAX_HOUR`. Exposed as `time_aware=true` on the
+  existing `/api/route` endpoint; **default is `false`, preserving the
+  original departure-hour-only response byte-for-byte** — verified with a
+  live curl comparison, not just reasoned about, so this is purely
+  additive with zero regression risk to the existing route mode.
+- **Proven, not just plausible**: `tests/test_routing.py` builds a new
+  synthetic `long_detour_graph()` fixture with edge lengths chosen so that,
+  at the configured walking speed, a direct path's cumulative travel time
+  provably crosses a forecast-hour boundary where a hazard appears. The
+  new test (`test_route_time_aware_avoids_hazard_that_appears_after_departure`)
+  demonstrates concretely that the *old* departure-hour router recommends
+  a path that turns out unsafe, while the *new* time-aware router
+  correctly detours around it — the actual value of the feature, shown
+  working, not asserted.
+- **Trip advisory — new `/api/route/advisory` endpoint and
+  `Router.route_advisory()`.** Answers a different, also-new question:
+  "across the whole 24 h forecast, when is it safe to make *this specific
+  trip*" — not a single hour's snapshot, and not "is my route blocked
+  right now," but every hour's safe/unsafe status for the trip's usual
+  path in one response. Deliberately implemented as its own method rather
+  than reusing `Router.route_window()` (the existing predictive-alert
+  mechanism `scripts/hourly_update.py` depends on, which only needs and
+  returns the *first* unsafe hour for a fixed alert) — kept separate so
+  this new read-only, ad-hoc-query feature carries zero risk to the
+  already-tested alert loop.
+- **Frontend wired to both**: `frontend/index.html` gets a "check hazard
+  at actual arrival time, not just departure" checkbox that toggles
+  `time_aware` on route requests and switches the result text to describe
+  elapsed travel time and whether the trip crosses an hour boundary; and a
+  new 24-cell green/red hour strip (`renderAdvisory()`) that calls
+  `/api/route/advisory` whenever an origin/destination is set, giving an
+  at-a-glance "safe now vs. wait until later" view for the exact trip
+  being planned. Verified with `node --check` on the extracted inline
+  script (including the nested ES6 template literals) and, live, by
+  curling the running server and confirming both new DOM elements are
+  actually served.
+- **DRY housekeeping alongside the feature**: `MAX_HOUR` was a local
+  constant duplicated in `api.py`; moved to `config.MAX_HOUR` so
+  `routing.py` can share the same forecast-window bound without importing
+  from `api.py` (a bad direction of dependency). `api.MAX_HOUR` kept as a
+  backward-compatible alias.
+- **Test count: 81 -> 96** (+7 `tests/test_routing.py` — the six behaviors
+  above plus an hour-clamping test against a hazard source that raises if
+  asked for an hour past the forecast horizon; +6 `tests/test_api.py` —
+  every request-validation path for both new/changed endpoints, confirmed
+  (via the existing monkeypatched-engine pattern) to reach the router and
+  nothing further when valid, and to reject before touching the database
+  when not; +2 `tests/test_integration.py` — both features hit through
+  the real FastAPI app against a real local Postgres+PostGIS, not just
+  the synthetic-graph unit tests). All 96 pass in plain `pytest -q`
+  (nothing running required except the 9 already-conditional integration
+  tests, which ran for real this pass, not skipped).
+- **Live end-to-end verification, not just tests**: regenerated the
+  dev_seed synthetic scenario, booted a real `uvicorn tidestep.api:app`
+  process, and hit it with real `curl` requests: `time_aware=true`
+  returns a route with the new `travel_time_min` / `arrival_hour` /
+  `hour_crossed` properties; `time_aware=false` (the default) returns a
+  response byte-identical in shape to the pre-existing format — proving
+  zero regression; `/api/route/advisory` for `vehicle_small` correctly
+  flags hour 7 unsafe, matching the already-established peak-hour ground
+  truth from `test_route_differs_by_profile_at_peak`; and `curl / | grep`
+  confirms the new `timeAware` checkbox and `advisory` strip are actually
+  served by the running frontend.
+- Docs updated to match: `docs/LIMITATIONS.md`'s "Hazard is evaluated at
+  departure hour" item rewritten to describe the new opt-in time-aware
+  mode (with the departure-hour-only default kept for compatibility, and
+  a clear note that this is separate from `route_window()`'s alert-loop
+  mechanism); `docs/NOVELTY.md`'s "What's actually new here" list gets two
+  new entries (time-expanded routing; the trip-advisory hour strip).
 
 ## Done (2026-09-08, fourth pass — second real bug found one layer above the
 first, dead code removed, coverage pushed from 74% to 95% on `tidestep/`)
@@ -316,9 +410,15 @@ fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
 
 ## Next (the laptop is now a working environment — these are all runnable
 there today; nothing left is blocked on tooling)
-1. **Commit and push.** Nothing described in this file or in `git status`
-   is on `origin/main` yet — see "Uncommitted work" below for the exact
+1. **Commit and push.** This pass's time-aware routing + trip advisory
+   work (and everything from the previous audit passes) is not on
+   `origin/main` yet — see "Uncommitted work" below for the exact
    commands. Do this first so the fixes above aren't sitting only on disk.
+1a. Once pushed, the natural next feature-work candidate (not started):
+   have `route_advisory()`'s hour strip re-route per hour instead of
+   reporting one fixed path's safe/unsafe status — "best way there at
+   6pm" instead of just "is the usual way there safe at 6pm" — noted as
+   an open gap in `docs/LIMITATIONS.md`'s Routing section.
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
@@ -357,34 +457,44 @@ Everything from this session and the previous ones is still sitting
 uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
 see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
 `docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
-committed and pushed (`8d779c6`, confirmed via `git log origin/main`) —
-`scripts/hourly_update.py` has since been modified again this pass (the
-sync_db fix, on top of the already-pushed strftime fix). Still uncommitted:
-- Modified: `README.md`, `tests/test_routing.py`, `tests/test_coops.py`,
-  `tidestep/api.py`, `tidestep/db.py`, `tidestep/routing.py`,
-  `tidestep/segments.py` (dead `_sample_points` removed), `scripts/build_hazard.py`
-  (near_inlet caching fix), `scripts/hourly_update.py` (this pass's sync_db
-  fix, on top of the already-pushed strftime fix), `docs/STATUS.md` (this
-  pass), `docs/LIMITATIONS.md` (earlier pass, still uncommitted).
-- New: `docs/NOVELTY.md`, `ios/`, `requirements-dev.txt`,
-  `scripts/dev_seed.py`, `scripts/validate_stage9.py`, `tidestep/validate.py`,
-  `tests/test_dev_seed.py`, `tests/test_integration.py`, `tests/test_validate.py`,
-  `tests/test_dem.py`, `tests/test_streets.py`, `tests/test_segments.py`,
-  `tests/test_db.py`, `tests/test_api.py`, `tests/test_build_hazard_script.py`,
-  `tests/test_hourly_update.py` (this pass).
+committed and pushed (`8d779c6`, confirmed via `git log origin/main`).
+Everything else described in this file, including this pass's new
+time-aware-routing/advisory feature work, is still local-only. Files
+touched **this pass** (on top of everything already listed as
+uncommitted in earlier revisions of this file):
+- Modified: `tidestep/config.py` (new `MAX_HOUR`, `WALK_SPEED_MPS`),
+  `tidestep/api.py` (`time_aware` query param, new `/api/route/advisory`
+  endpoint), `tidestep/routing.py` (`route_time_aware`, `route_advisory`,
+  `time_aware_route_geojson`, supporting dataclasses/helpers),
+  `frontend/index.html` (time-aware checkbox + advisory hour strip),
+  `tests/test_routing.py` (+7), `tests/test_api.py` (+6),
+  `tests/test_integration.py` (+2), `docs/LIMITATIONS.md` (Routing
+  section rewritten), `docs/NOVELTY.md` (+2 entries), `docs/STATUS.md`
+  (this section).
+- Everything else previously listed here (from the four earlier passes:
+  `README.md`, `tidestep/db.py`, `tidestep/segments.py`,
+  `scripts/build_hazard.py`, `scripts/hourly_update.py`, `docs/NOVELTY.md`,
+  `ios/`, `requirements-dev.txt`, `scripts/dev_seed.py`,
+  `scripts/validate_stage9.py`, `tidestep/validate.py`, and the earlier
+  new test files) is still uncommitted too — nothing described anywhere
+  in this file has reached `origin/main` since `8d779c6`.
 
 Suggested split, each buildable in one `git add` + `git commit`:
 1. `docs/STATUS.md docs/NOVELTY.md docs/LIMITATIONS.md README.md` — docs.
-2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests
-   (predictive alerting, dev_seed fixture, validate.py, api/db hardening,
-   the near_inlet caching fix, the hourly_update.py sync_db fix, the new
-   test files).
-3. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
+2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests (every
+   feature and fix across all five passes: predictive alerting, dev_seed
+   fixture, validate.py, api/db hardening, the near_inlet caching fix, the
+   hourly_update.py sync_db fix, and this pass's time-aware routing +
+   trip advisory).
+3. `frontend/index.html` — the new UI for time-aware routing + the
+   advisory hour strip (small enough to call out on its own so a reviewer
+   can see exactly what changed in the demo-facing surface).
+4. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
    compiler.
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "audit: fix hourly_update.py segment-reload bug, remove dead code, 74->81 tests (95% tidestep/ coverage)"
+git commit -m "routing: time-expanded arrival-hour-aware routing + trip advisory endpoint (81->96 tests)"
 git push
 ```
 

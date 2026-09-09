@@ -6,18 +6,22 @@ requested forecast hour gets weight None (networkx treats that as "no
 edge"). Edges whose highway type the profile cannot use are excluded the
 same way. Everything else is weighted by length in metres.
 
-MVP simplification (stated in the write-up): hazard is evaluated at the
-departure hour for the whole trip. A trip long enough to span an hour
-boundary would need per-edge arrival-time hazard; that is a 2.0 item.
+``route()`` evaluates hazard once, at the departure hour, for the whole
+trip -- fine for most trips at this bbox's scale, but a known simplification
+(see docs/LIMITATIONS.md). ``route_time_aware()`` below removes that
+simplification: it tracks elapsed travel time as the route is built and
+checks each edge against the hazard state at the hour a traveler would
+*actually* be crossing it, not the hour they left.
 """
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass
 
 import networkx as nx
 import osmnx as ox
 
-from . import db
+from . import config, db
 
 # highway types each profile may use. Pedestrian profiles use everything
 # (a sidewalk-less residential street is still walkable); vehicles skip
@@ -59,6 +63,38 @@ class WindowResult:
     first_unsafe_hour: int | None    # None = safe for the whole window checked
     max_depth_cm: int                # deepest water the flood-blind route hits, any hour
     baseline_length_m: float | None  # None only if no path exists at all (any profile)
+
+
+@dataclass
+class TimeAwareRouteResult:
+    """Like RouteResult, but hazard was checked at each edge's own arrival
+    hour (see Router.route_time_aware), not once at departure."""
+    nodes: list[int]
+    coords: list[tuple[float, float]]      # (lat, lon)
+    length_m: float
+    travel_time_min: float
+    departure_hour: int
+    arrival_hour: int          # forecast hour bucket when the traveler reaches the destination
+    hour_crossed: bool         # True if the trip spans more than one forecast-hour bucket
+    max_depth_cm_on_route: int  # each edge evaluated at ITS OWN arrival hour, not departure hour
+
+
+@dataclass
+class HourAdvisory:
+    hour: int
+    safe: bool
+    max_depth_cm: int
+
+
+@dataclass
+class RouteAdvisory:
+    """Hour-by-hour safe/unsafe forecast for one trip's usual (flood-blind)
+    path across a whole window -- "when today is it safe to make this
+    specific trip", for a rider planning ahead, as opposed to
+    Router.route_window's single first-unsafe-hour (built for the alert
+    loop's narrower "did it just become unsafe" question)."""
+    baseline_length_m: float | None   # None only if no path exists at all (any profile)
+    hours: list[HourAdvisory]
 
 
 class Router:
@@ -160,6 +196,162 @@ class Router:
         return WindowResult(first_unsafe_hour=first_unsafe, max_depth_cm=max_depth,
                             baseline_length_m=float(base_len))
 
+    def route_advisory(self, origin: tuple[float, float], destination: tuple[float, float],
+                       profile: str, hours: range) -> RouteAdvisory:
+        """Full hour-by-hour safe/unsafe forecast for this trip's usual
+        (flood-blind) path -- a "best time to leave" advisory for trip
+        planning, as opposed to route_window's single first-unsafe-hour
+        (built for the alert loop, which only cares about the moment a
+        saved route first crosses into unsafe territory).
+
+        Deliberately not built on top of route_window(): that method's
+        contract (first_unsafe_hour only) is already relied on by
+        scripts/hourly_update.py and covered by its own tests, and this
+        method's "every hour, not just the first bad one" shape is
+        different enough that sharing code would mean changing tested
+        behavior to serve a second caller. Some loop duplication with
+        route_window() below is the safer trade.
+        """
+        s, t = self.nearest(*origin, profile), self.nearest(*destination, profile)
+        try:
+            base_len, base_nodes = nx.single_source_dijkstra(
+                self.G, s, t, weight=self._weight(profile, set()))
+        except nx.NetworkXNoPath:
+            return RouteAdvisory(baseline_length_m=None,
+                                 hours=[HourAdvisory(hour=h, safe=False, max_depth_cm=0)
+                                        for h in hours])
+
+        base_edges = list(zip(base_nodes[:-1], base_nodes[1:]))
+        out = []
+        for h in hours:
+            unsafe = db.unsafe_edges(self.engine, h, profile)
+            depth = db.edge_hazard(self.engine, h)
+            depth_by_edge = {(r.u, r.v, r.key): int(r.depth_cm) for r in depth.itertuples()}
+            blocked = False
+            max_depth = 0
+            for u, v in base_edges:
+                for k in self.G[u][v]:
+                    if (u, v, k) in unsafe:
+                        blocked = True
+                    max_depth = max(max_depth, depth_by_edge.get((u, v, k), 0))
+            out.append(HourAdvisory(hour=h, safe=not blocked, max_depth_cm=max_depth))
+        return RouteAdvisory(baseline_length_m=float(base_len), hours=out)
+
+    def _edge_time_s(self, attrs, profile: str) -> float:
+        """Seconds a traveler of ``profile`` actually spends on this edge --
+        what makes time-aware routing possible: without this we only know
+        an edge's length, not when along the trip someone would be
+        crossing it. Vehicles use the travel_time osmnx already derives
+        from posted speed limits (tidestep/streets.py:
+        ox.add_edge_travel_times); pedestrian profiles use a constant
+        walking speed (config.WALK_SPEED_MPS)."""
+        length = attrs.get("length", 1.0)
+        if profile in VEHICLE_PROFILES:
+            t = attrs.get("travel_time")
+            if t is not None:
+                return float(t)
+            # osmnx couldn't assign a speed to this edge (rare, e.g. a
+            # highway type missing from its speed table): fall back to a
+            # conservative 30 km/h residential-street assumption rather
+            # than crashing.
+            return length / (30 / 3.6)
+        return length / config.WALK_SPEED_MPS[profile]
+
+    def route_time_aware(self, origin: tuple[float, float], destination: tuple[float, float],
+                         profile: str, departure_hour: int) -> TimeAwareRouteResult | None:
+        """Like route(), but hazard is checked at each edge's own arrival
+        hour instead of once at the departure hour for the whole trip --
+        retiring the MVP simplification stated in docs/PIPELINE.md Stage 6
+        and docs/LIMITATIONS.md ("Hazard is evaluated at departure hour for
+        the whole trip"). A route that looks clear when you leave can still
+        be the wrong recommendation if a later segment floods by the time
+        you'd actually reach it; this catches that instead of silently
+        giving an unsafe answer.
+
+        This can't reuse plain networkx Dijkstra with a fixed weight
+        function: which hour's hazard applies to an edge depends on how
+        much time has already elapsed on the path so far, which isn't
+        available inside a per-edge weight callback. This is a small
+        hand-rolled Dijkstra over (elapsed_seconds, node) instead, using
+        _edge_time_s as the edge weight and re-deriving the current hour
+        from accumulated time at each pop.
+        """
+        s, t = self.nearest(*origin, profile), self.nearest(*destination, profile)
+        max_hour = config.MAX_HOUR
+        unsafe_cache: dict[int, set[tuple]] = {}
+        depth_cache: dict[int, dict[tuple, int]] = {}
+
+        def unsafe_at(h: int) -> set[tuple]:
+            if h not in unsafe_cache:
+                unsafe_cache[h] = db.unsafe_edges(self.engine, h, profile)
+            return unsafe_cache[h]
+
+        def depth_at(h: int) -> dict[tuple, int]:
+            if h not in depth_cache:
+                df = db.edge_hazard(self.engine, h)
+                depth_cache[h] = {(r.u, r.v, r.key): int(r.depth_cm) for r in df.itertuples()}
+            return depth_cache[h]
+
+        dist: dict[int, float] = {s: 0.0}
+        prev: dict[int, tuple[int, int]] = {}   # node -> (prev_node, key of edge used)
+        visited: set[int] = set()
+        pq: list[tuple[float, int]] = [(0.0, s)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if u in visited:
+                continue
+            visited.add(u)
+            if u == t:
+                break
+            hour = min(departure_hour + int(d // 3600), max_hour)
+            unsafe = unsafe_at(hour)
+            for v, keydict in self.G[u].items():
+                for k, attrs in keydict.items():
+                    if (u, v, k) in unsafe or not edge_allowed(profile, attrs):
+                        continue
+                    nd = d + self._edge_time_s(attrs, profile)
+                    if v not in dist or nd < dist[v]:
+                        dist[v] = nd
+                        prev[v] = (u, k)
+                        heapq.heappush(pq, (nd, v))
+
+        if t not in dist:
+            return None
+
+        # reconstruct the path from the prev pointers
+        nodes = [t]
+        keys: list[int] = []
+        cur = t
+        while cur != s:
+            p, k = prev[cur]
+            keys.append(k)
+            nodes.append(p)
+            cur = p
+        nodes.reverse()
+        keys.reverse()
+
+        travel_time_s = dist[t]
+        departure_hour = min(departure_hour, max_hour)
+        arrival_hour = min(departure_hour + int(travel_time_s // 3600), max_hour)
+
+        max_depth = 0
+        elapsed = 0.0
+        length_m = 0.0
+        for u, v, k in zip(nodes[:-1], nodes[1:], keys):
+            attrs = self.G[u][v][k]
+            hour = min(departure_hour + int(elapsed // 3600), max_hour)
+            max_depth = max(max_depth, depth_at(hour).get((u, v, k), 0))
+            elapsed += self._edge_time_s(attrs, profile)
+            length_m += attrs.get("length", 1.0)
+
+        coords = [(self.G.nodes[n]["y"], self.G.nodes[n]["x"]) for n in nodes]
+        return TimeAwareRouteResult(
+            nodes=nodes, coords=coords, length_m=float(length_m),
+            travel_time_min=round(travel_time_s / 60, 1),
+            departure_hour=departure_hour, arrival_hour=arrival_hour,
+            hour_crossed=arrival_hour != departure_hour,
+            max_depth_cm_on_route=max_depth)
+
     def route_geojson(self, res: RouteResult) -> dict:
         return {
             "type": "Feature",
@@ -172,5 +364,21 @@ class Router:
                 "baseline_blocked": res.baseline_blocked,
                 "avoided_edges": res.avoided_edges,
                 "max_depth_cm_on_route": res.max_depth_cm_on_route,
+            },
+        }
+
+    def time_aware_route_geojson(self, res: TimeAwareRouteResult) -> dict:
+        return {
+            "type": "Feature",
+            "geometry": {"type": "LineString",
+                         "coordinates": [[lon, lat] for lat, lon in res.coords]},
+            "properties": {
+                "length_m": round(res.length_m, 1),
+                "travel_time_min": res.travel_time_min,
+                "departure_hour": res.departure_hour,
+                "arrival_hour": res.arrival_hour,
+                "hour_crossed": res.hour_crossed,
+                "max_depth_cm_on_route": res.max_depth_cm_on_route,
+                "time_aware": True,
             },
         }

@@ -93,3 +93,27 @@ SEED_ELEVATION_M = -1.0
 
 # --- Road segmentation ------------------------------------------------------
 SEGMENT_LENGTH_M = 15
+
+# --- Routing: how far the API lets ?hour= reach ------------------------------
+# Bound the ?hour= query param (and any hour offset used for time-aware
+# routing below) to what the model actually forecasts. Previously duplicated
+# as a local constant in api.py; centralized here so routing.py's time-aware
+# router can share the same bound without importing from api.py.
+MAX_HOUR = FORECAST_HOURS - 1
+
+# --- Pedestrian walking speed, for time-aware routing ------------------------
+# Used to convert a segment's length into how long a traveler is actually on
+# it, so time-aware routing (Router.route_time_aware) can check the hazard
+# state at the hour they'd really be there, not just the hour they left.
+# Vehicle profiles instead use the travel_time osmnx already computes from
+# posted speed limits (tidestep/streets.py: ox.add_edge_travel_times).
+# Figures are typical planning values, not measured for this study area:
+# adult ~1.4 m/s (5.0 km/h) is the standard "average adult walking speed"
+# used in pedestrian planning (e.g. MUTCD crosswalk-timing guidance uses a
+# similar range); child ~1.0 m/s (3.6 km/h) is a commonly used slower figure
+# for children in the same literature. Treated as a documented simplification
+# (see docs/LIMITATIONS.md), not a precise per-person estimate.
+WALK_SPEED_MPS = {
+    "child": 1.0,
+    "adult": 1.4,
+}

@@ -138,6 +138,42 @@ def test_saved_routes_crud(seeded_app):
     assert not any(x["route_id"] == rid for x in client.get("/api/routes").json())
 
 
+def test_route_time_aware_endpoint_works_against_real_data(seeded_app):
+    """The new time_aware routing mode, hit through the real HTTP endpoint
+    against real loaded data -- not just the synthetic-graph unit tests in
+    test_routing.py. Confirms the FastAPI wiring (time_aware=true ->
+    Router.route_time_aware -> time_aware_route_geojson) actually works
+    end to end, not just that each piece works in isolation."""
+    client, *_ = seeded_app
+    origin = dict(olat=40.9, olon=-73.6998, dlat=40.9, dlon=-73.6748)
+    r = client.get("/api/route", params={**origin, "profile": "adult", "hour": 0,
+                                         "time_aware": True})
+    assert r.status_code == 200
+    body = r.json()
+    # this synthetic trip is short enough not to cross an hour boundary, so
+    # a route should exist and carry the time-aware-specific properties
+    assert body["geometry"] is not None
+    assert body["properties"]["time_aware"] is True
+    assert "arrival_hour" in body["properties"]
+    assert "travel_time_min" in body["properties"]
+
+
+def test_route_advisory_endpoint_matches_known_peak_hour(seeded_app):
+    """The advisory endpoint's per-hour safe/unsafe list, against real
+    loaded data, must agree with what test_route_differs_by_profile_at_peak
+    above already established directly against /api/route: vehicle_small
+    has no safe route at hour 7 (the synthetic scenario's known peak)."""
+    client, *_ = seeded_app
+    origin = dict(olat=40.9, olon=-73.6998, dlat=40.9, dlon=-73.6748)
+    r = client.get("/api/route/advisory", params={**origin, "profile": "vehicle_small"})
+    assert r.status_code == 200
+    body = r.json()
+    from tidestep import config
+    assert len(body["hours"]) == config.FORECAST_HOURS
+    by_hour = {h["hour"]: h for h in body["hours"]}
+    assert by_hour[7]["safe"] is False   # matches the known peak-hour fact above
+
+
 def test_route_window_matches_per_profile_flood_timing(seeded_app):
     """Cross-check the predictive alert logic (routing.route_window) against
     the hazard table it is supposed to summarize: the first hour it reports

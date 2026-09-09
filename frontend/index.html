@@ -25,6 +25,12 @@
   #result { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
   .hint { font-size:12px; color:var(--muted); margin-top:6px; }
   .wl { font-variant-numeric: tabular-nums; }
+  .checkrow { display:flex; align-items:center; gap:6px; margin-top:8px; font-size:12px; color:var(--fg); }
+  .checkrow input { width:auto; margin:0; }
+  #advisory { margin-top:8px; }
+  #advisory .strip { display:flex; gap:1px; border-radius:4px; overflow:hidden; height:14px; }
+  #advisory .strip span { flex:1; }
+  #advisory .caption { font-size:11px; color:var(--muted); margin-top:3px; }
 </style>
 </head>
 <body>
@@ -47,9 +53,12 @@
   <div class="hint">Click the map to set start, click again for destination.</div>
   <input type="text" id="from" placeholder="start: click map" readonly>
   <input type="text" id="to" placeholder="destination: click map" readonly style="margin-top:4px">
+  <label class="checkrow"><input type="checkbox" id="timeAware">
+    check hazard at actual arrival time, not just departure</label>
   <button id="go">Find safe route</button>
   <button id="clear" class="secondary">Clear</button>
   <div id="result"></div>
+  <div id="advisory"></div>
 
   <div class="legend">
     <span><i class="sw" style="background:#2e7d32"></i>safe</span>
@@ -123,19 +132,50 @@ async function showHour(h) {
 
 async function route() {
   if (!start || !dest) return;
+  const timeAware = $('timeAware').checked;
   const q = new URLSearchParams({ olat: start.lat, olon: start.lng, dlat: dest.lat, dlon: dest.lng,
-                                  profile: $('profile').value, hour });
+                                  profile: $('profile').value, hour, time_aware: timeAware });
   const r = await fetch('/api/route?' + q); const f = await r.json();
   if (routeLayer) map.removeLayer(routeLayer);
   const res = $('result'); res.style.display = 'block';
-  if (!f.geometry) { res.innerHTML = '<b>No safe route</b> at this hour for this profile.'; return; }
+  if (!f.geometry) { res.innerHTML = '<b>No safe route</b> at this hour for this profile.'; renderAdvisory(); return; }
   routeLayer = L.geoJSON(f, { style: { color: '#0b5fff', weight: 5, opacity: 0.9 } }).addTo(map);
   const p = f.properties;
   const km = m => (m / 1000).toFixed(2) + ' km';
-  res.innerHTML = `<b>${km(p.length_m)}</b>` +
-    (p.baseline_blocked ? ` — the usual route (${km(p.baseline_length_m)}) crosses water; detour avoids ${p.avoided_edges} unsafe edges.`
-                        : ` — usual route is clear at this hour.`) +
-    (p.max_depth_cm_on_route > 0 ? `<br>Deepest water on route: ${p.max_depth_cm_on_route} cm.` : '');
+  if (timeAware) {
+    // time-aware mode: no baseline/avoided_edges (those are departure-hour
+    // concepts) -- instead show how long the trip takes and whether it
+    // crosses into a later forecast hour along the way.
+    res.innerHTML = `<b>${km(p.length_m)}</b> · ~${p.travel_time_min} min` +
+      (p.hour_crossed ? ` — arrives around hour ${p.arrival_hour} (later than departure hour ${p.departure_hour}); hazard was checked for each segment at the hour you'd actually reach it.`
+                      : ` — arrives within the same forecast hour.`) +
+      (p.max_depth_cm_on_route > 0 ? `<br>Deepest water on route (at each segment's own arrival hour): ${p.max_depth_cm_on_route} cm.` : '');
+  } else {
+    res.innerHTML = `<b>${km(p.length_m)}</b>` +
+      (p.baseline_blocked ? ` — the usual route (${km(p.baseline_length_m)}) crosses water; detour avoids ${p.avoided_edges} unsafe edges.`
+                          : ` — usual route is clear at this hour.`) +
+      (p.max_depth_cm_on_route > 0 ? `<br>Deepest water on route: ${p.max_depth_cm_on_route} cm.` : '');
+  }
+  renderAdvisory();
+}
+
+async function renderAdvisory() {
+  const el = $('advisory');
+  if (!start || !dest) { el.innerHTML = ''; return; }
+  const q = new URLSearchParams({ olat: start.lat, olon: start.lng, dlat: dest.lat, dlon: dest.lng,
+                                  profile: $('profile').value });
+  const r = await fetch('/api/route/advisory?' + q); const a = await r.json();
+  if (a.baseline_length_m == null) {
+    el.innerHTML = `<div class="caption">No route exists for this profile between these points, flooding aside.</div>`;
+    return;
+  }
+  const cells = a.hours.map(h =>
+    `<span title="hour ${h.hour}: ${h.safe ? 'safe' : `unsafe (${h.max_depth_cm} cm)`}"
+           style="background:${h.safe ? '#2e7d32' : '#c62828'}"></span>`).join('');
+  const nUnsafe = a.hours.filter(h => !h.safe).length;
+  el.innerHTML = `<div class="strip">${cells}</div>` +
+    `<div class="caption">Safe to leave now &nbsp;→&nbsp; +24h for this trip` +
+    (nUnsafe ? ` · unsafe ${nUnsafe} of ${a.hours.length} hours` : ' · safe the whole window') + `</div>`;
 }
 
 map.on('click', e => {
@@ -146,9 +186,10 @@ const fmtLL = ll => `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`;
 $('go').onclick = route;
 $('clear').onclick = () => {
   start = dest = null; [startMk, destMk, routeLayer].forEach(l => l && map.removeLayer(l));
-  $('from').value = $('to').value = ''; $('result').style.display = 'none';
+  $('from').value = $('to').value = ''; $('result').style.display = 'none'; $('advisory').innerHTML = '';
 };
 $('profile').onchange = () => { if (riskLayer) riskLayer.setStyle(style); route(); };
+$('timeAware').onchange = route;
 $('slider').oninput = e => showHour(+e.target.value);
 
 let timer = null;

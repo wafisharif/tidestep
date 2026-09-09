@@ -48,15 +48,40 @@ notice. Each one is also called out in the module it applies to.
 
 ## Routing
 
-- **Hazard is evaluated at departure hour for the whole trip.** A route
-  that takes long enough to cross an hour boundary is not re-checked
-  against the hazard state for the hour a traveler would actually be on
-  each later segment. For a bbox this size (walk/drive times of a few
-  minutes to ~20 minutes) this rarely matters, but it is a known
-  simplification, not an oversight.
-- **MVP router is a full graph recompute per query** (networkx Dijkstra),
-  which is fine at this bbox's scale but would not scale city-wide without
-  moving to something like OSRM with hourly traffic-speed-file swaps.
+- **Hazard-at-departure-hour is now opt-in, not the only mode.**
+  `Router.route_time_aware()` (`tidestep/routing.py`, exposed via
+  `/api/route?time_aware=true`) is a genuine time-expanded shortest-path
+  search: it converts each edge's length into actual time-on-segment
+  (`config.WALK_SPEED_MPS` for pedestrians, osmnx's posted-speed-limit
+  `travel_time` for vehicles), tracks cumulative elapsed time along the
+  path, and checks hazard state at the forecast hour a traveler would
+  *actually* be on each segment, not the hour they left. The plain
+  `/api/route` (no `time_aware` flag, the default) keeps the original
+  departure-hour-only behavior unchanged, byte-for-byte, for backward
+  compatibility — this was verified directly (curl comparison of the two
+  response shapes) rather than assumed. For this bbox's scale (walk/drive
+  times of a few minutes to ~20 minutes) the two modes usually agree, but
+  `tests/test_routing.py::test_route_time_aware_avoids_hazard_that_appears_after_departure`
+  constructs a case where they provably don't, and only the time-aware
+  mode gets it right. This is separate from `Router.route_window()` (used
+  by `scripts/hourly_update.py`'s predictive-alert loop), which already
+  scanned the full 24 h window for a *fixed* baseline path's first-unsafe
+  hour — that mechanism is unchanged by this work.
+- **Time-aware routing still assumes free-flow travel time.** It has no
+  model of how flooding itself might slow a traveler down (wading through
+  ankle-deep water is slower than the dry-pavement walking/driving speed
+  used to compute elapsed time) — a second-order effect, not accounted
+  for.
+- **`route_advisory()`'s hour-by-hour forecast is against one fixed
+  (flood-blind) path**, not a re-routed path per hour — it answers "is my
+  usual way there safe at hour H," not "what's the best way there at hour
+  H" for every hour. Combining the two (best route per hour, not just
+  safe/unsafe of the same route) is a natural next step, not yet built.
+- **MVP router is a full graph recompute per query** (networkx Dijkstra
+  for the plain router; a hand-rolled Dijkstra over `(elapsed_time, node)`
+  state for the time-aware router), which is fine at this bbox's scale
+  but would not scale city-wide without moving to something like OSRM
+  with hourly traffic-speed-file swaps.
 
 ## Alerts
 
