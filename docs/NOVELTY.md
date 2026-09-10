@@ -157,12 +157,27 @@ tool nobody had packaged this way for this problem.
    time, showing the old departure-hour router gives an unsafe answer and
    the new one gives the correct one.
 7. **"When is it safe to make this specific trip today," not just "is it
-   safe right now."** The new `/api/route/advisory` endpoint
+   safe right now."** The `/api/route/advisory` endpoint
    (`Router.route_advisory()`) reports safe/unsafe for a given trip across
-   the *entire* 24 h forecast window in one call, rendered in the
-   frontend as a 24-cell hour strip — turning "check the map at noon,
-   check it again at 6" into a single glance answering "when today can I
-   make this trip."
+   the *entire* 24 h forecast window in one call — turning "check the map
+   at noon, check it again at 6" into a single glance answering "when
+   today can I make this trip."
+8. **"Best way there now," not just "is my usual way blocked."**
+   `route_advisory()` (above) still only checks one fixed, flood-blind
+   path against each hour — so if that one path floods all day, it
+   reports the trip as unsafe all day, even if a real detour would get
+   someone there safely right now. `Router.route_best_departure()`
+   (`/api/route/best_departure`) closes that gap: it recomputes the
+   actual best route for every hour in the forecast window (reusing the
+   time-expanded router from item 6), and surfaces the earliest hour a
+   real route exists at all, detour included. The frontend's hour strip
+   is powered by this endpoint, with a "best time to leave" line showing
+   the recommended hour, the route's length/time, and how much longer it
+   is than the ideal flood-blind path. Proven with a constructed case
+   (`tests/test_routing.py::test_route_best_departure_finds_a_safe_detour_advisory_would_call_unsafe`)
+   where the coarser advisory check reports a trip impossible all day
+   while the best-departure planner correctly finds a safe detour
+   available immediately.
 
 ## What TideStep does *not* claim
 

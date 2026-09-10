@@ -164,16 +164,33 @@ async function renderAdvisory() {
   if (!start || !dest) { el.innerHTML = ''; return; }
   const q = new URLSearchParams({ olat: start.lat, olon: start.lng, dlat: dest.lat, dlon: dest.lng,
                                   profile: $('profile').value });
-  const r = await fetch('/api/route/advisory?' + q); const a = await r.json();
+  // best_departure recomputes the ACTUAL best route for every hour (not
+  // just whether one fixed baseline path is blocked), so it can find a
+  // real detour that keeps a trip possible at an hour a naive per-path
+  // check would have to call unsafe.
+  const r = await fetch('/api/route/best_departure?' + q); const a = await r.json();
   if (a.baseline_length_m == null) {
     el.innerHTML = `<div class="caption">No route exists for this profile between these points, flooding aside.</div>`;
     return;
   }
   const cells = a.hours.map(h =>
-    `<span title="hour ${h.hour}: ${h.safe ? 'safe' : `unsafe (${h.max_depth_cm} cm)`}"
+    `<span title="hour ${h.hour}: ${h.safe
+        ? `safe · ${(h.length_m / 1000).toFixed(2)} km, ~${h.travel_time_min} min`
+        : 'no safe route this hour'}"
            style="background:${h.safe ? '#2e7d32' : '#c62828'}"></span>`).join('');
   const nUnsafe = a.hours.filter(h => !h.safe).length;
+  let rec;
+  if (a.recommended_hour != null) {
+    const longer = a.recommended_length_m > a.baseline_length_m
+      ? ` (${Math.round(100 * (a.recommended_length_m / a.baseline_length_m - 1))}% longer than the direct route)`
+      : '';
+    rec = `Best time to leave: <b>hour ${a.recommended_hour}</b> — ` +
+      `${(a.recommended_length_m / 1000).toFixed(2)} km, ~${a.recommended_travel_time_min} min${longer}.`;
+  } else {
+    rec = 'No safe route exists for this trip at any hour in the forecast.';
+  }
   el.innerHTML = `<div class="strip">${cells}</div>` +
+    `<div class="caption">${rec}</div>` +
     `<div class="caption">Safe to leave now &nbsp;→&nbsp; +24h for this trip` +
     (nUnsafe ? ` · unsafe ${nUnsafe} of ${a.hours.length} hours` : ' · safe the whole window') + `</div>`;
 }

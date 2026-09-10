@@ -12,6 +12,13 @@ trip -- fine for most trips at this bbox's scale, but a known simplification
 simplification: it tracks elapsed travel time as the route is built and
 checks each edge against the hazard state at the hour a traveler would
 *actually* be crossing it, not the hour they left.
+
+``route_advisory()`` reports, hour by hour across a forecast window,
+whether one fixed (flood-blind) path is safe -- cheap, but blind to any
+detour. ``route_best_departure()`` goes further: it recomputes the actual
+best route (via route_time_aware()) at every hour, so it can find "there's
+a safe way there right now, just longer" instead of reporting every hour
+unsafe just because the *usual* path floods all day.
 """
 from __future__ import annotations
 
@@ -95,6 +102,40 @@ class RouteAdvisory:
     loop's narrower "did it just become unsafe" question)."""
     baseline_length_m: float | None   # None only if no path exists at all (any profile)
     hours: list[HourAdvisory]
+
+
+@dataclass
+class HourRoute:
+    """One hour's ACTUAL best route for route_best_departure -- not just
+    whether the *usual* path is blocked (that's what HourAdvisory /
+    RouteAdvisory answer above) but what the real shortest safe route is
+    if a traveler left at this hour, which may detour around flooding the
+    usual path hits."""
+    hour: int
+    safe: bool                       # True if any route exists departing this hour
+    length_m: float | None
+    travel_time_min: float | None
+    max_depth_cm_on_route: int | None
+
+
+@dataclass
+class BestDeparturePlan:
+    """Per-hour *actual* best routes for a trip, across a forecast window,
+    plus the earliest hour a real route exists at all.
+
+    This is deliberately a different, more expensive question than
+    RouteAdvisory answers: RouteAdvisory fixes one flood-blind baseline
+    path and checks it against each hour's hazard state, so if that one
+    path is blocked at every hour it reports every hour unsafe -- even
+    when a real (longer) detour would get a traveler there safely right
+    now. BestDeparturePlan recomputes the actual best route for each hour
+    (via route_time_aware), so "the usual way floods all day" and "there's
+    no safe way to get there today" are no longer the same answer."""
+    baseline_length_m: float | None        # flood-blind ideal length, for comparison only
+    hours: list[HourRoute]
+    recommended_hour: int | None           # earliest hour with a real route, or None
+    recommended_length_m: float | None
+    recommended_travel_time_min: float | None
 
 
 class Router:
@@ -351,6 +392,57 @@ class Router:
             departure_hour=departure_hour, arrival_hour=arrival_hour,
             hour_crossed=arrival_hour != departure_hour,
             max_depth_cm_on_route=max_depth)
+
+    def route_best_departure(self, origin: tuple[float, float], destination: tuple[float, float],
+                             profile: str, hours: range) -> BestDeparturePlan:
+        """Recompute the *actual* best route for every hour in ``hours``,
+        not just whether one fixed path is blocked. route_advisory() above
+        answers "is my usual way there safe at hour H" against a single
+        flood-blind baseline path; this answers the more useful "what's
+        the best way there at hour H" -- which can surface a real detour
+        that keeps a trip possible at an hour route_advisory() would have
+        to call unsafe, because it never looks past that one baseline
+        path.
+
+        Built on route_time_aware() (one full shortest-path search per
+        candidate departure hour) rather than a from-scratch loop, so each
+        hour's answer reuses the same engine and hazard-at-arrival-hour
+        correctness route_time_aware() already has and is already tested
+        for -- this method's job is only to run it across the window and
+        summarize. That does mean up to len(hours) full searches per call
+        (each of which may itself look up hazard data for several hours,
+        as travel time advances the clock) -- fine at this bbox's scale,
+        same tradeoff already accepted for route()/route_advisory() (see
+        docs/LIMITATIONS.md's "full graph recompute per query" note).
+        """
+        s, t = self.nearest(*origin, profile), self.nearest(*destination, profile)
+        try:
+            base_len, _ = nx.single_source_dijkstra(
+                self.G, s, t, weight=self._weight(profile, set()))
+        except nx.NetworkXNoPath:
+            base_len = None
+
+        out: list[HourRoute] = []
+        recommended_hour = None
+        recommended_length_m = None
+        recommended_travel_time_min = None
+        for h in hours:
+            res = self.route_time_aware(origin, destination, profile, h)
+            if res is None:
+                out.append(HourRoute(hour=h, safe=False, length_m=None,
+                                     travel_time_min=None, max_depth_cm_on_route=None))
+                continue
+            out.append(HourRoute(hour=h, safe=True, length_m=res.length_m,
+                                 travel_time_min=res.travel_time_min,
+                                 max_depth_cm_on_route=res.max_depth_cm_on_route))
+            if recommended_hour is None:
+                recommended_hour = h
+                recommended_length_m = res.length_m
+                recommended_travel_time_min = res.travel_time_min
+        return BestDeparturePlan(baseline_length_m=base_len, hours=out,
+                                 recommended_hour=recommended_hour,
+                                 recommended_length_m=recommended_length_m,
+                                 recommended_travel_time_min=recommended_travel_time_min)
 
     def route_geojson(self, res: RouteResult) -> dict:
         return {

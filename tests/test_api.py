@@ -140,3 +140,21 @@ def test_route_advisory_valid_request_reaches_the_router(client):
     with pytest.raises(AssertionError):
         client.get("/api/route/advisory", params=dict(
             olat=40.80, olon=-73.71, dlat=40.81, dlon=-73.70, profile="adult"))
+
+
+def test_route_best_departure_rejects_unknown_profile_before_touching_the_database(client):
+    r = client.get("/api/route/best_departure", params=dict(
+        olat=40.80, olon=-73.71, dlat=40.81, dlon=-73.70, profile="dog"))
+    assert r.status_code == 400
+    assert "profile" in r.json()["detail"]
+
+
+def test_route_best_departure_requires_all_coordinates(client):
+    r = client.get("/api/route/best_departure", params=dict(olat=40.80, olon=-73.71, profile="adult"))
+    assert r.status_code == 422   # dlat/dlon missing
+
+
+def test_route_best_departure_valid_request_reaches_the_router(client):
+    with pytest.raises(AssertionError):
+        client.get("/api/route/best_departure", params=dict(
+            olat=40.80, olon=-73.71, dlat=40.81, dlon=-73.70, profile="adult"))

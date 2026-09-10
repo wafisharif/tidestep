@@ -15,6 +15,12 @@ GET  /api/route/advisory?olat&olon&dlat&dlon&profile
                                          hour-by-hour safe/unsafe forecast for this specific trip's
                                          usual path, for "when today is it safe to make this
                                          trip" trip planning (Router.route_advisory)
+GET  /api/route/best_departure?olat&olon&dlat&dlon&profile
+                                         hour-by-hour ACTUAL best route (not just safe/unsafe of
+                                         one fixed path) plus the earliest hour a real route
+                                         exists -- can find a safe detour at an hour
+                                         /api/route/advisory would call unsafe because its usual
+                                         path floods (Router.route_best_departure)
 GET  /api/routes                        saved routes
 POST /api/routes                        save a route for alerting
 DELETE /api/routes/{id}
@@ -139,6 +145,34 @@ def get_route_advisory(olat: float, olon: float, dlat: float, dlon: float,
         else round(adv.baseline_length_m, 1),
         "hours": [{"hour": h.hour, "safe": h.safe, "max_depth_cm": h.max_depth_cm}
                  for h in adv.hours],
+    }
+
+
+@app.get("/api/route/best_departure")
+def get_route_best_departure(olat: float, olon: float, dlat: float, dlon: float,
+                             profile: str = "adult"):
+    """Per-hour ACTUAL best route across the forecast window (not just
+    safe/unsafe of one fixed path -- see /api/route/advisory above), plus
+    the earliest hour a real route exists at all. Lets the frontend say
+    "you can still go now, just a bit longer" instead of only "wait until
+    6pm", which /api/route/advisory would say whenever the *usual* path is
+    what's flooded but a real detour exists."""
+    if profile not in hazard.PROFILES:
+        raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
+    plan = router().route_best_departure((olat, olon), (dlat, dlon), profile,
+                                         range(config.FORECAST_HOURS))
+    return {
+        "baseline_length_m": None if plan.baseline_length_m is None
+        else round(plan.baseline_length_m, 1),
+        "recommended_hour": plan.recommended_hour,
+        "recommended_length_m": None if plan.recommended_length_m is None
+        else round(plan.recommended_length_m, 1),
+        "recommended_travel_time_min": plan.recommended_travel_time_min,
+        "hours": [{"hour": h.hour, "safe": h.safe,
+                   "length_m": None if h.length_m is None else round(h.length_m, 1),
+                   "travel_time_min": h.travel_time_min,
+                   "max_depth_cm_on_route": h.max_depth_cm_on_route}
+                 for h in plan.hours],
     }
 
 

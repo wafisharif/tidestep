@@ -174,6 +174,48 @@ def test_route_advisory_endpoint_matches_known_peak_hour(seeded_app):
     assert by_hour[7]["safe"] is False   # matches the known peak-hour fact above
 
 
+def test_route_best_departure_endpoint_matches_known_adult_never_floods_fact(seeded_app):
+    """adult never gets an unsafe hour in this scenario (established by
+    test_route_window_matches_per_profile_flood_timing below via
+    route_window, and consistent with test_route_differs_by_profile_at_peak
+    above showing adult has a route even at the synthetic peak hour), so
+    the earliest safe departure should be right away, with the endpoint
+    reporting every hour safe."""
+    client, *_ = seeded_app
+    origin = dict(olat=40.9, olon=-73.6998, dlat=40.9, dlon=-73.6748)
+    r = client.get("/api/route/best_departure", params={**origin, "profile": "adult"})
+    assert r.status_code == 200
+    body = r.json()
+    from tidestep import config
+    assert len(body["hours"]) == config.FORECAST_HOURS
+    assert body["recommended_hour"] == 0
+    assert body["recommended_length_m"] is not None
+    assert all(h["safe"] for h in body["hours"])
+
+
+def test_route_best_departure_endpoint_self_consistent_for_vehicle_small(seeded_app):
+    """vehicle_small DOES hit flooding constraints in this scenario (it
+    has no safe route at the peak hour per test_route_differs_by_profile_at_peak
+    above). The exact per-hour numbers depend on the synthetic street
+    topology's available detours and aren't asserted here -- what must
+    hold regardless is internal self-consistency: recommended_hour is set
+    if and only if some hour is reported safe, and the recommended hour's
+    own entry is itself marked safe with a real length."""
+    client, *_ = seeded_app
+    origin = dict(olat=40.9, olon=-73.6998, dlat=40.9, dlon=-73.6748)
+    r = client.get("/api/route/best_departure", params={**origin, "profile": "vehicle_small"})
+    assert r.status_code == 200
+    body = r.json()
+    from tidestep import config
+    assert len(body["hours"]) == config.FORECAST_HOURS
+    any_safe = any(h["safe"] for h in body["hours"])
+    assert (body["recommended_hour"] is not None) == any_safe
+    if any_safe:
+        rec = next(h for h in body["hours"] if h["hour"] == body["recommended_hour"])
+        assert rec["safe"] is True
+        assert rec["length_m"] == body["recommended_length_m"]
+
+
 def test_route_window_matches_per_profile_flood_timing(seeded_app):
     """Cross-check the predictive alert logic (routing.route_window) against
     the hazard table it is supposed to summarize: the first hour it reports

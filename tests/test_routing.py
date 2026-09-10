@@ -249,3 +249,73 @@ def test_route_advisory_no_path_reports_every_hour_unsafe(monkeypatch):
     adv = R.route_advisory((0, 0), (1, 1), "adult", range(3))
     assert adv.baseline_length_m is None
     assert [h.safe for h in adv.hours] == [False, False, False]
+
+
+def test_route_best_departure_finds_a_safe_detour_advisory_would_call_unsafe(monkeypatch):
+    """route_advisory() checks only the fixed 'usual' (flood-blind
+    baseline) path -- the direct edge -- against each hour's hazard state,
+    so if the direct edge is unsafe at every hour it reports every hour as
+    unsafe, even though a real detour exists. route_best_departure()
+    actually recomputes the best route at each hour (via
+    route_time_aware()), so it correctly finds the detour is safe right
+    away -- concrete proof this answers a genuinely different, more useful
+    question than route_advisory()."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDB({(1, 2, 0), (2, 1, 0)}))
+    R = routing.Router(G, engine=object())
+
+    adv = R.route_advisory((0, 0), (0, 0.001), "child", range(3))
+    assert all(h.safe is False for h in adv.hours)   # baseline-only view: looks hopeless
+
+    plan = R.route_best_departure((0, 0), (0, 0.001), "child", range(3))
+    assert plan.recommended_hour == 0                 # but a detour is safe right away
+    assert plan.recommended_length_m == 330
+    assert plan.baseline_length_m == 100               # ideal flood-blind length, for comparison
+    assert all(h.safe for h in plan.hours)
+    assert all(h.length_m == 330 for h in plan.hours)
+    assert all(h.max_depth_cm_on_route == 0 for h in plan.hours)  # detour never floods
+
+
+def test_route_best_departure_picks_earliest_safe_hour(monkeypatch):
+    """When the direct edge is only blocked for the first two hours,
+    recommended_hour should be 0 (a safe detour exists right away, even
+    though the direct path only clears up at hour 2), and each hour's
+    reported length should reflect what actually was best THAT hour: the
+    longer detour while blocked, the short direct edge once it clears."""
+    G = square_graph()
+    by_hour = {0: {(1, 2, 0), (2, 1, 0)}, 1: {(1, 2, 0), (2, 1, 0)}, 2: set(), 3: set()}
+    monkeypatch.setattr(routing, "db", FakeDBByHour(by_hour, depth_cm=50))
+    R = routing.Router(G, engine=object())
+    plan = R.route_best_departure((0, 0), (0, 0.001), "child", range(4))
+    assert [h.safe for h in plan.hours] == [True, True, True, True]
+    assert plan.hours[0].length_m == 330 and plan.hours[1].length_m == 330
+    assert plan.hours[2].length_m == 100 and plan.hours[3].length_m == 100
+    assert plan.recommended_hour == 0
+    assert plan.recommended_length_m == 330
+
+
+def test_route_best_departure_no_path_returns_none_recommended(monkeypatch):
+    G = nx.MultiDiGraph(crs="EPSG:4326")
+    G.add_node(1, x=0, y=0); G.add_node(2, x=1, y=1)  # disconnected
+    monkeypatch.setattr(routing, "db", FakeDBByHour({}))
+    R = routing.Router(G, engine=object())
+    plan = R.route_best_departure((0, 0), (1, 1), "adult", range(3))
+    assert plan.recommended_hour is None
+    assert plan.recommended_length_m is None
+    assert plan.recommended_travel_time_min is None
+    assert plan.baseline_length_m is None
+    assert all(h.safe is False for h in plan.hours)
+
+
+def test_route_best_departure_respects_hour_clamp_at_forecast_horizon(monkeypatch):
+    """Same clamping guarantee as route_time_aware() (StrictHourDB raises
+    if asked for hazard past the forecast horizon), exercised through
+    route_best_departure()'s per-hour loop rather than a single call."""
+    from tidestep import config
+    G = long_detour_graph()
+    monkeypatch.setattr(routing, "db", StrictHourDB(config.MAX_HOUR))
+    R = routing.Router(G, engine=object())
+    plan = R.route_best_departure((0, 0), (0, 0.011), "adult",
+                                  range(config.MAX_HOUR, config.MAX_HOUR + 1))
+    assert plan.hours[0].safe is True
+    assert plan.recommended_hour == config.MAX_HOUR

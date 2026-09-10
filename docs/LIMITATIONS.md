@@ -75,13 +75,30 @@ notice. Each one is also called out in the module it applies to.
 - **`route_advisory()`'s hour-by-hour forecast is against one fixed
   (flood-blind) path**, not a re-routed path per hour — it answers "is my
   usual way there safe at hour H," not "what's the best way there at hour
-  H" for every hour. Combining the two (best route per hour, not just
-  safe/unsafe of the same route) is a natural next step, not yet built.
+  H" for every hour. **Now addressed for the case where a real detour
+  exists**: `Router.route_best_departure()` (`/api/route/best_departure`)
+  recomputes the actual best route at every hour via `route_time_aware()`
+  and reports the earliest hour a real route exists at all, not just
+  whether the *usual* path is clear — proven with a synthetic case
+  (`tests/test_routing.py::test_route_best_departure_finds_a_safe_detour_advisory_would_call_unsafe`)
+  where `route_advisory()` reports every hour unsafe (the direct path
+  never clears) while `route_best_departure()` correctly finds a longer
+  but safe detour available immediately. This is more expensive (up to
+  24 full shortest-path searches per call, one per candidate hour, vs.
+  `route_advisory()`'s single search) — acceptable at this bbox's scale,
+  the same tradeoff already accepted below for a full-graph-recompute
+  router; not something a city-scale deployment could do unchanged. Note
+  honestly: in the current synthetic dev_seed street topology, no real
+  detour actually exists for the vehicle profiles once the direct route
+  floods, so `route_best_departure()` and `route_advisory()` happen to
+  agree there — the algorithm's extra value is proven by the controlled
+  unit test, not (yet) visible in the synthetic demo data itself.
 - **MVP router is a full graph recompute per query** (networkx Dijkstra
   for the plain router; a hand-rolled Dijkstra over `(elapsed_time, node)`
-  state for the time-aware router), which is fine at this bbox's scale
-  but would not scale city-wide without moving to something like OSRM
-  with hourly traffic-speed-file swaps.
+  state for the time-aware router, run up to once per forecast hour for
+  `route_best_departure()`), which is fine at this bbox's scale but would
+  not scale city-wide without moving to something like OSRM with hourly
+  traffic-speed-file swaps.
 
 ## Alerts
 

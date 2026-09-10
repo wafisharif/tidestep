@@ -1,6 +1,100 @@
 # Status
 
-Updated: 2026-09-09
+Updated: 2026-09-10
+
+## Done (2026-09-10, sixth pass — "best time to leave" trip planning:
+`route_best_departure()` closes the exact gap the fifth pass flagged as
+its own next step)
+
+This pass builds directly on the previous one's new feature (time-aware
+routing) and its own stated next-step candidate in this file's "Next"
+section: `route_advisory()` only checks whether one fixed, flood-blind
+path is safe hour by hour — so a trip whose *usual* route floods all day
+gets reported as impossible all day, even when a real (longer) detour
+would get someone there safely right now. This pass builds the fix.
+
+- **`Router.route_best_departure()`** (`tidestep/routing.py`, exposed via
+  new `/api/route/best_departure`) recomputes the *actual* best route for
+  every hour in the forecast window — not just whether the usual path is
+  blocked — by calling the previous pass's `route_time_aware()` once per
+  candidate departure hour and collecting the result. It reports, per
+  hour: whether any route exists, its real length and travel time, and
+  the deepest water it crosses; plus a single `recommended_hour` — the
+  earliest hour a real route exists at all — with that route's length and
+  travel time, and the flood-blind baseline length for comparison.
+- **Proven to answer a genuinely different question than the existing
+  advisory endpoint, not just a rename of it**:
+  `tests/test_routing.py::test_route_best_departure_finds_a_safe_detour_advisory_would_call_unsafe`
+  constructs a graph where the direct path is unsafe at every hour.
+  `route_advisory()` (unchanged, still tested against its original
+  behavior) correctly reports every hour unsafe — it only ever looks at
+  that one path. `route_best_departure()`, on the same graph, correctly
+  finds the longer detour is safe immediately and reports
+  `recommended_hour = 0` — because it's actually searching for the best
+  route each hour, not just re-checking one fixed path. Two more unit
+  tests cover picking the *earliest* safe hour when the direct path only
+  clears up partway through the window, and the no-path-exists-at-all
+  case. A third confirms the same forecast-horizon hour-clamping
+  guarantee `route_time_aware()` already has holds through this method's
+  per-hour loop too.
+- **Deliberately reuses, doesn't reimplement, the time-aware engine.**
+  `route_best_departure()` is a thin per-hour loop over
+  `route_time_aware()` — the already-tested arrival-hour-correct search —
+  rather than a new hand-rolled Dijkstra, so its own correctness rests on
+  code already proven correct, and any future fix to `route_time_aware()`
+  automatically benefits this method too. Kept as its own method rather
+  than folded into `route_advisory()` (unchanged, its existing tests and
+  `scripts/hourly_update.py` callers untouched) — same "don't touch
+  tested, relied-on code to add a new, different-shaped feature" pattern
+  the previous four passes all followed.
+- **Test count: 96 -> 105** (+4 `tests/test_routing.py`, +3
+  `tests/test_api.py` request-validation paths for the new endpoint
+  (unknown profile / missing coordinates / valid request reaches the
+  router — matching the existing pattern for every other endpoint), +2
+  `tests/test_integration.py` against real loaded data: one anchored to
+  the already-established fact that `adult` never floods in this scenario
+  (asserts `recommended_hour == 0`, every hour safe), one a
+  self-consistency check for `vehicle_small` that doesn't overclaim
+  specific hours the synthetic topology may or may not support a detour
+  for). All 105 pass in `pytest -q` with nothing running (the 11
+  DB-dependent integration tests ran for real against a live local
+  Postgres this pass too, not skipped).
+- **Live end-to-end verification**: regenerated the dev_seed scenario,
+  booted a real `uvicorn` process, and curled the new endpoint directly.
+  Confirmed live and worth recording honestly: `adult` is safe at every
+  hour with `recommended_hour: 0` (matches the unit-test-proven logic and
+  the established "adult never floods" fact); `vehicle_small` is safe
+  only at hour 0 and unsafe hours 1-23, **matching** what
+  `/api/route/advisory` already reported for the same trip — meaning in
+  *this specific synthetic street topology* there is in fact no real
+  vehicle detour around the flooded segment, so the two endpoints happen
+  to agree here. That's not a bug or a wasted feature: it's the honest
+  result for this data, and it's exactly why the synthetic
+  `long_detour_graph()` unit test above exists — to prove the *algorithm*
+  finds a detour when the *street network* actually has one, independent
+  of whether this particular demo scenario's graph happens to have one
+  available for vehicles. `time_aware=false` on `/api/route` was also
+  re-confirmed byte-identical to its pre-existing shape (zero regression
+  carried over from last pass, reconfirmed here since `routing.py` was
+  touched again).
+- **Frontend rewired to the richer endpoint**: the existing 24-cell hour
+  strip (`renderAdvisory()`) now calls `/api/route/best_departure` instead
+  of `/api/route/advisory` — same visual widget, but each safe hour's
+  tooltip now shows the real route length/time for that hour instead of
+  just "safe", and a new "Best time to leave: hour N — X km, ~Y min"
+  callout appears above the strip, including a "(Z% longer than the
+  direct route)" note when the recommended route isn't the ideal
+  flood-blind path. `/api/route/advisory` itself is untouched and still
+  live (kept for any lighter-weight caller that only needs the cheaper
+  single-path check). Verified via `node --check` on the extracted inline
+  script and, live, by curling the running server and confirming the new
+  strings (`best_departure`, `renderAdvisory`, `Best time to leave`) are
+  actually served.
+- Docs updated: `docs/LIMITATIONS.md`'s note about `route_advisory()`
+  only checking one fixed path now describes `route_best_departure()` as
+  addressing that gap (with the honest caveat about the current demo
+  data's topology above); `docs/NOVELTY.md` gets a new numbered
+  differentiator.
 
 ## Done (2026-09-09, fifth pass — genuinely new feature work, not just
 audit/bugfix: time-expanded routing + trip advisory)
@@ -410,15 +504,23 @@ fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
 
 ## Next (the laptop is now a working environment — these are all runnable
 there today; nothing left is blocked on tooling)
-1. **Commit and push.** This pass's time-aware routing + trip advisory
-   work (and everything from the previous audit passes) is not on
+1. **Commit and push.** This pass's `route_best_departure()` / "best time
+   to leave" work (and everything from every previous pass) is not on
    `origin/main` yet — see "Uncommitted work" below for the exact
    commands. Do this first so the fixes above aren't sitting only on disk.
-1a. Once pushed, the natural next feature-work candidate (not started):
-   have `route_advisory()`'s hour strip re-route per hour instead of
-   reporting one fixed path's safe/unsafe status — "best way there at
-   6pm" instead of just "is the usual way there safe at 6pm" — noted as
-   an open gap in `docs/LIMITATIONS.md`'s Routing section.
+1a. Once pushed, feature-work candidates worth considering next (none
+   started): (i) a **multi-stop / waypoint planner** — chain several
+   `route_time_aware()` legs so a trip with stops (e.g. school run then
+   grocery store) gets one combined safe/unsafe verdict, instead of a user
+   manually checking each leg separately; (ii) an **evacuation-style
+   "nearest safe high ground" finder** — instead of point-to-point A-to-B,
+   given just a current location, find the closest node/segment that is
+   never flooded across the whole forecast window and route to it, a
+   genuinely different framing (get to safety) than trip planning (get to
+   a destination); (iii) push `route_best_departure()`'s per-hour search
+   from a full 24-hour sweep down to only the hours between two changes in
+   safety state, to cut its DB-query count if it ever needs to run against
+   a much larger street graph than this bbox's.
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
@@ -458,43 +560,43 @@ uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
 see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
 `docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
 committed and pushed (`8d779c6`, confirmed via `git log origin/main`).
-Everything else described in this file, including this pass's new
-time-aware-routing/advisory feature work, is still local-only. Files
-touched **this pass** (on top of everything already listed as
-uncommitted in earlier revisions of this file):
-- Modified: `tidestep/config.py` (new `MAX_HOUR`, `WALK_SPEED_MPS`),
-  `tidestep/api.py` (`time_aware` query param, new `/api/route/advisory`
-  endpoint), `tidestep/routing.py` (`route_time_aware`, `route_advisory`,
-  `time_aware_route_geojson`, supporting dataclasses/helpers),
-  `frontend/index.html` (time-aware checkbox + advisory hour strip),
-  `tests/test_routing.py` (+7), `tests/test_api.py` (+6),
+Everything else described in this file, including this pass's
+`route_best_departure()` work and the previous pass's time-aware-routing
+work, is still local-only. Files touched **this pass** (on top of
+everything already listed as uncommitted from earlier passes):
+- Modified: `tidestep/routing.py` (`route_best_departure`, `HourRoute`,
+  `BestDeparturePlan`), `tidestep/api.py` (new `/api/route/best_departure`
+  endpoint), `frontend/index.html` (hour strip now powered by
+  `best_departure`, new "best time to leave" callout),
+  `tests/test_routing.py` (+4), `tests/test_api.py` (+3),
   `tests/test_integration.py` (+2), `docs/LIMITATIONS.md` (Routing
-  section rewritten), `docs/NOVELTY.md` (+2 entries), `docs/STATUS.md`
+  section updated), `docs/NOVELTY.md` (+1 entry), `docs/STATUS.md`
   (this section).
-- Everything else previously listed here (from the four earlier passes:
-  `README.md`, `tidestep/db.py`, `tidestep/segments.py`,
-  `scripts/build_hazard.py`, `scripts/hourly_update.py`, `docs/NOVELTY.md`,
-  `ios/`, `requirements-dev.txt`, `scripts/dev_seed.py`,
-  `scripts/validate_stage9.py`, `tidestep/validate.py`, and the earlier
-  new test files) is still uncommitted too — nothing described anywhere
-  in this file has reached `origin/main` since `8d779c6`.
+- Everything else previously listed here (from the five earlier passes:
+  `README.md`, `tidestep/config.py`, `tidestep/db.py`,
+  `tidestep/segments.py`, `scripts/build_hazard.py`,
+  `scripts/hourly_update.py`, `ios/`, `requirements-dev.txt`,
+  `scripts/dev_seed.py`, `scripts/validate_stage9.py`,
+  `tidestep/validate.py`, and every earlier new test file) is still
+  uncommitted too — nothing described anywhere in this file has reached
+  `origin/main` since `8d779c6`.
 
 Suggested split, each buildable in one `git add` + `git commit`:
 1. `docs/STATUS.md docs/NOVELTY.md docs/LIMITATIONS.md README.md` — docs.
 2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests (every
-   feature and fix across all five passes: predictive alerting, dev_seed
+   feature and fix across all six passes: predictive alerting, dev_seed
    fixture, validate.py, api/db hardening, the near_inlet caching fix, the
-   hourly_update.py sync_db fix, and this pass's time-aware routing +
-   trip advisory).
-3. `frontend/index.html` — the new UI for time-aware routing + the
-   advisory hour strip (small enough to call out on its own so a reviewer
-   can see exactly what changed in the demo-facing surface).
+   hourly_update.py sync_db fix, time-aware routing + trip advisory, and
+   this pass's route_best_departure()).
+3. `frontend/index.html` — the UI for time-aware routing + the hour strip
+   / best-time-to-leave callout (small enough to call out on its own so a
+   reviewer can see exactly what changed in the demo-facing surface).
 4. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
    compiler.
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "routing: time-expanded arrival-hour-aware routing + trip advisory endpoint (81->96 tests)"
+git commit -m "routing: best-departure planner recomputes the actual best route per hour (96->105 tests)"
 git push
 ```
 
