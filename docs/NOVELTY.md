@@ -178,6 +178,33 @@ tool nobody had packaged this way for this problem.
    where the coarser advisory check reports a trip impossible all day
    while the best-departure planner correctly finds a safe detour
    available immediately.
+9. **Multi-stop trips, chained correctly through time, not just checked
+   leg by leg at the same hour.** `POST /api/route/multi_stop`
+   (`Router.route_multi_stop()`) routes through an ordered list of
+   waypoints — a real day's errand run, not just point A to point B — and
+   critically, checks each leg's hazard state starting from the PREVIOUS
+   leg's actual arrival hour, not the trip's overall departure hour
+   repeated for every leg. That distinction is not cosmetic: a later leg
+   can look completely safe if (wrongly) checked at hour 0, while the
+   time actually spent on earlier legs means a traveler wouldn't reach it
+   until an hour when it has already flooded.
+   `tests/test_routing.py::test_route_multi_stop_catches_a_leg_that_floods_by_the_time_you_reach_it`
+   constructs exactly that trap and confirms the chained check catches it
+   while an isolated per-leg check would not — the same class of
+   correctness fix as time-aware single-leg routing (item 6), applied one
+   level up.
+10. **Evacuation-style routing with no destination required.** Every
+    other feature in this app answers "get me to a specific place I have
+    in mind." `GET /api/route/to_safety` (`Router.route_to_safety()`)
+    answers a different, genuinely useful question for an actual flood
+    emergency: "I don't have a destination — where can I go that's
+    safe?" It searches the street network for the nearest reachable point
+    that stays flood-safe for the given profile across the rest of the
+    forecast window (not just this instant), using a multi-target version
+    of the time-expanded router so the answer accounts for how long it
+    actually takes to get there. This reframes TideStep from a trip
+    planner into something closer to what a resident would actually reach
+    for in the moment a road starts flooding around them.
 
 ## What TideStep does *not* claim
 

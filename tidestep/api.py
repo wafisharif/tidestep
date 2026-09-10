@@ -21,6 +21,14 @@ GET  /api/route/best_departure?olat&olon&dlat&dlon&profile
                                          exists -- can find a safe detour at an hour
                                          /api/route/advisory would call unsafe because its usual
                                          path floods (Router.route_best_departure)
+POST /api/route/multi_stop              flood-avoiding route through an ordered list of 2+
+                                         waypoints (JSON body), where each leg's hazard check
+                                         starts from the PREVIOUS leg's actual arrival hour, not
+                                         hour 0 repeated for every leg (Router.route_multi_stop)
+GET  /api/route/to_safety?olat&olon&profile&hour
+                                         evacuation-style routing: nearest reachable point that
+                                         stays flood-safe for the rest of the forecast window, no
+                                         destination required (Router.route_to_safety)
 GET  /api/routes                        saved routes
 POST /api/routes                        save a route for alerting
 DELETE /api/routes/{id}
@@ -174,6 +182,55 @@ def get_route_best_departure(olat: float, olon: float, dlat: float, dlon: float,
                    "max_depth_cm_on_route": h.max_depth_cm_on_route}
                  for h in plan.hours],
     }
+
+
+class Waypoint(BaseModel):
+    lat: float
+    lon: float
+
+
+class MultiStopRequest(BaseModel):
+    waypoints: list[Waypoint] = Field(
+        ..., min_length=2, max_length=10,
+        description="ordered stops: origin, any intermediate stops, final destination")
+    profile: str = "adult"
+    hour: int = Field(0, ge=0, le=config.MAX_HOUR, description="departure hour for the first leg")
+
+
+@app.post("/api/route/multi_stop")
+def post_route_multi_stop(req: MultiStopRequest):
+    """Flood-avoiding route through an ordered list of 2+ waypoints, where
+    each leg is checked against the hazard state at the hour a traveler
+    would actually START that leg -- the PREVIOUS leg's real arrival
+    hour, not the trip's overall departure hour repeated for every leg
+    independently (which would repeat, one level up, the exact mistake
+    time-aware routing was built to fix for a single leg). See
+    Router.route_multi_stop for the constructed case this matters for."""
+    if req.profile not in hazard.PROFILES:
+        raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
+    pts = [(w.lat, w.lon) for w in req.waypoints]
+    plan = router().route_multi_stop(pts, req.profile, req.hour)
+    return router().multi_stop_route_geojson(plan)
+
+
+@app.get("/api/route/to_safety")
+def get_route_to_safety(olat: float, olon: float, profile: str = "adult",
+                        hour: int = Query(0, ge=0, le=config.MAX_HOUR)):
+    """Evacuation-style routing: given only a starting point (no
+    destination), find the nearest reachable point that stays flood-safe
+    for ``profile`` across the rest of the forecast window and route
+    there. Every other routing endpoint needs a destination the traveler
+    already has in mind; this answers "where can I go that's safe" for
+    someone who doesn't (see Router.route_to_safety)."""
+    if profile not in hazard.PROFILES:
+        raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
+    res = router().route_to_safety((olat, olon), profile, hour)
+    if res is None:
+        return JSONResponse({"type": "Feature", "geometry": None,
+                             "properties": {"error": "no reachable safe haven found "
+                                                      "for this profile in the forecast window"}},
+                            status_code=200)
+    return router().safe_haven_geojson(res)
 
 
 class SavedRoute(BaseModel):

@@ -2,6 +2,104 @@
 
 Updated: 2026-09-10
 
+## Done (2026-09-10, seventh pass — two new routing capabilities:
+multi-stop trip chaining and destination-free evacuation routing)
+
+This pass builds the two feature candidates the sixth pass's "Next"
+section proposed: multi-stop trips and a "nearest safe high ground"
+finder. Both are genuinely new questions the app can now answer, not
+variations on what already existed, and both are built entirely on
+`route_time_aware()` (fourth pass) rather than new pathfinding code.
+
+- **`Router.route_multi_stop()`** (`POST /api/route/multi_stop`) routes
+  through an ordered list of 2-10 waypoints — an errand run with stops,
+  not just point-to-point — by chaining `route_time_aware()` calls where
+  each leg's departure hour is the PREVIOUS leg's actual arrival hour.
+  That chaining is the entire point: checking each leg independently at
+  the trip's starting hour repeats, one level up, the exact "hazard at
+  departure hour" mistake time-aware routing was built to fix for a
+  single leg. Proven with a constructed case
+  (`tests/test_routing.py::test_route_multi_stop_catches_a_leg_that_floods_by_the_time_you_reach_it`)
+  where a second leg looks completely safe checked in isolation at hour
+  0, but the real trip — because the first leg alone takes over an hour —
+  wouldn't reach it until hour 1, by which point it has flooded;
+  `route_multi_stop()` correctly reports the trip blocked there, and the
+  test explicitly confirms the naive per-leg-at-hour-0 check would have
+  missed it. If a leg can't be completed, the response reports which one
+  (`blocked_leg_index`) and still returns the legs that succeeded before
+  it, so a user can see "you can safely get this far."
+- **`Router.route_to_safety()`** (`GET /api/route/to_safety`) answers a
+  genuinely different question from every other routing method in this
+  app: not "get me to a destination I have in mind" but "I don't have
+  one — where can I go that's safe?" Given only a starting point and
+  profile, it searches for the nearest reachable point that stays
+  flood-safe for the rest of the forecast window (not just this instant),
+  via a new `db.always_safe_nodes()` query and a multi-target version of
+  the time-expanded Dijkstra (stops at the *first* popped node that
+  qualifies, which — because Dijkstra pops in increasing order of elapsed
+  time — is guaranteed nearest in actual travel time, not just straight-
+  line distance). Handles the "you're already somewhere safe" case as a
+  zero-length result rather than an unnecessary route, and correctly
+  reports "no reachable haven" when none exists for a profile in the
+  window (honestly reproduced live for `vehicle_small` at the synthetic
+  scenario's peak hour, below).
+- **Real bug found and fixed via live testing, not just unit tests**:
+  the first live check of `/api/route/multi_stop` against real seeded
+  data hit a case where two requested waypoints snapped to the same
+  street graph node, producing a zero-length leg whose GeoJSON Feature
+  was an invalid single-coordinate LineString (the GeoJSON spec requires
+  at least two positions in a LineString). Fixed by emitting a Point
+  geometry for any zero-length leg instead — the same treatment already
+  used for `route_to_safety()`'s "already safe" case — and added a
+  regression test
+  (`test_multi_stop_route_geojson_uses_point_when_a_leg_is_zero_length`)
+  reproducing the exact scenario so it can't silently regress.
+- **Test count: 105 -> 126** (+10 `tests/test_routing.py`: the two
+  constructed correctness demonstrations above, happy-path and
+  already-safe and no-haven and unreachable-haven cases for
+  `route_to_safety()`, a spy test confirming `always_safe_nodes()` is
+  queried from the requested departure hour onward (not the whole
+  window, which would wrongly disqualify a haven that only floods
+  earlier in the day), and the zero-length-leg regression above; +8
+  `tests/test_api.py` request-validation paths for both new endpoints;
+  +3 `tests/test_integration.py` against real loaded data: a full
+  3-waypoint trip for `adult` (which never floods in this scenario, so
+  every leg should succeed), a bad-profile rejection, and a
+  self-consistency check for `route_to_safety()` that doesn't overclaim
+  a specific destination the synthetic topology may or may not have).
+  All 126 pass in `pytest -q`, including the 14 DB-dependent integration
+  tests run for real against a live local Postgres this pass.
+- **Live end-to-end verification**: regenerated the dev_seed scenario,
+  booted a real `uvicorn` process, and curled both new endpoints
+  directly. `multi_stop` correctly chains a 3-waypoint adult trip end to
+  end; `to_safety` for `adult` at hour 0 correctly reports "already
+  safe" (adult never floods in this scenario); `to_safety` for
+  `vehicle_small` at hour 0 returns a real routed detour (55.6 m, a
+  genuine non-trivial result); `to_safety` for `vehicle_small` at the
+  peak hour 7 honestly reports no reachable haven exists for that
+  profile at that hour in this scenario — not fabricated, the real
+  result of a real search. Every previously-existing endpoint
+  (`/api/route`, `/api/route/best_departure`, `/api/route/advisory`) was
+  re-curled and reconfirmed byte-identical to its pre-existing shape —
+  zero regression, since `routing.py` and `api.py` were touched again
+  this pass.
+- **Frontend**: two new panel sections. "Multi-stop trip" — a checkbox
+  toggles click-to-add-stop mode (numbered purple markers), a "Plan
+  trip" button posts the collected waypoints and draws each leg in a
+  distinct color, with a result line covering both the success and
+  blocked-leg cases. "Evacuate to safety" — a button that reuses the
+  route panel's already-set start point, calls the new endpoint, and
+  draws the result as a dashed orange line (or a marker for the
+  already-safe case). Verified via `node --check` on the extracted
+  inline script and, live, by curling the running server and confirming
+  the new DOM elements (`multiStopMode`, `planTrip`, `findSafety`,
+  `tripResult`, `safetyResult`) are actually served.
+- Docs updated: `docs/LIMITATIONS.md` gets two new honest caveats (no
+  stop-order optimization for multi-stop trips; `route_to_safety()`'s
+  "safe haven" is any dry point, not a known real shelter location, and
+  still inherits the still-water-ponding-only model); `docs/NOVELTY.md`
+  gets two new numbered differentiators (9, 10).
+
 ## Done (2026-09-10, sixth pass — "best time to leave" trip planning:
 `route_best_departure()` closes the exact gap the fifth pass flagged as
 its own next step)
@@ -504,23 +602,23 @@ fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
 
 ## Next (the laptop is now a working environment — these are all runnable
 there today; nothing left is blocked on tooling)
-1. **Commit and push.** This pass's `route_best_departure()` / "best time
-   to leave" work (and everything from every previous pass) is not on
-   `origin/main` yet — see "Uncommitted work" below for the exact
+1. **Commit and push.** This pass's multi-stop trip planner and
+   evacuation-routing work (and everything from every previous pass) is
+   not on `origin/main` yet — see "Uncommitted work" below for the exact
    commands. Do this first so the fixes above aren't sitting only on disk.
 1a. Once pushed, feature-work candidates worth considering next (none
-   started): (i) a **multi-stop / waypoint planner** — chain several
-   `route_time_aware()` legs so a trip with stops (e.g. school run then
-   grocery store) gets one combined safe/unsafe verdict, instead of a user
-   manually checking each leg separately; (ii) an **evacuation-style
-   "nearest safe high ground" finder** — instead of point-to-point A-to-B,
-   given just a current location, find the closest node/segment that is
-   never flooded across the whole forecast window and route to it, a
-   genuinely different framing (get to safety) than trip planning (get to
-   a destination); (iii) push `route_best_departure()`'s per-hour search
-   from a full 24-hour sweep down to only the hours between two changes in
-   safety state, to cut its DB-query count if it ever needs to run against
-   a much larger street graph than this bbox's.
+   started): (i) **stop-order optimization for multi-stop trips** — right
+   now `route_multi_stop()` routes waypoints in the order given; a small
+   number of stops (≤6-7) is cheap enough to brute-force the best visiting
+   order, flagged honestly as a gap in `docs/LIMITATIONS.md`; (ii)
+   **real shelter locations for `route_to_safety()`** — it currently
+   treats any dry street segment as a valid haven; loading an actual POI
+   layer (schools, firehouses) would make its answer meaningfully more
+   useful, also flagged in `docs/LIMITATIONS.md`; (iii) push
+   `route_best_departure()`'s per-hour search from a full 24-hour sweep
+   down to only the hours between two changes in safety state, to cut its
+   DB-query count if it ever needs to run against a much larger street
+   graph than this bbox's.
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
@@ -560,43 +658,45 @@ uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
 see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
 `docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
 committed and pushed (`8d779c6`, confirmed via `git log origin/main`).
-Everything else described in this file, including this pass's
-`route_best_departure()` work and the previous pass's time-aware-routing
-work, is still local-only. Files touched **this pass** (on top of
-everything already listed as uncommitted from earlier passes):
-- Modified: `tidestep/routing.py` (`route_best_departure`, `HourRoute`,
-  `BestDeparturePlan`), `tidestep/api.py` (new `/api/route/best_departure`
-  endpoint), `frontend/index.html` (hour strip now powered by
-  `best_departure`, new "best time to leave" callout),
-  `tests/test_routing.py` (+4), `tests/test_api.py` (+3),
-  `tests/test_integration.py` (+2), `docs/LIMITATIONS.md` (Routing
-  section updated), `docs/NOVELTY.md` (+1 entry), `docs/STATUS.md`
-  (this section).
-- Everything else previously listed here (from the five earlier passes:
-  `README.md`, `tidestep/config.py`, `tidestep/db.py`,
-  `tidestep/segments.py`, `scripts/build_hazard.py`,
-  `scripts/hourly_update.py`, `ios/`, `requirements-dev.txt`,
-  `scripts/dev_seed.py`, `scripts/validate_stage9.py`,
-  `tidestep/validate.py`, and every earlier new test file) is still
-  uncommitted too — nothing described anywhere in this file has reached
-  `origin/main` since `8d779c6`.
+Everything else described in this file, including this pass's multi-stop
+trip planner and evacuation-routing work, is still local-only. Files
+touched **this pass** (on top of everything already listed as
+uncommitted from earlier passes):
+- Modified: `tidestep/routing.py` (`route_multi_stop`, `route_to_safety`,
+  `multi_stop_route_geojson`, `safe_haven_geojson`, `TripLeg`, `TripPlan`,
+  `SafeHavenResult`), `tidestep/db.py` (new `always_safe_nodes()`),
+  `tidestep/api.py` (new `POST /api/route/multi_stop` and `GET
+  /api/route/to_safety` endpoints), `frontend/index.html` (new
+  "Multi-stop trip" and "Evacuate to safety" panel sections),
+  `tests/test_routing.py` (+10), `tests/test_api.py` (+8),
+  `tests/test_integration.py` (+3), `docs/LIMITATIONS.md` (+2 new
+  caveats), `docs/NOVELTY.md` (+2 entries), `docs/STATUS.md` (this
+  section).
+- Everything else previously listed here (from the six earlier passes:
+  `README.md`, `tidestep/config.py`, `tidestep/segments.py`,
+  `scripts/build_hazard.py`, `scripts/hourly_update.py`, `ios/`,
+  `requirements-dev.txt`, `scripts/dev_seed.py`,
+  `scripts/validate_stage9.py`, `tidestep/validate.py`, and every earlier
+  new test file) is still uncommitted too — nothing described anywhere
+  in this file has reached `origin/main` since `8d779c6`.
 
 Suggested split, each buildable in one `git add` + `git commit`:
 1. `docs/STATUS.md docs/NOVELTY.md docs/LIMITATIONS.md README.md` — docs.
 2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests (every
-   feature and fix across all six passes: predictive alerting, dev_seed
+   feature and fix across all seven passes: predictive alerting, dev_seed
    fixture, validate.py, api/db hardening, the near_inlet caching fix, the
-   hourly_update.py sync_db fix, time-aware routing + trip advisory, and
-   this pass's route_best_departure()).
-3. `frontend/index.html` — the UI for time-aware routing + the hour strip
-   / best-time-to-leave callout (small enough to call out on its own so a
-   reviewer can see exactly what changed in the demo-facing surface).
+   hourly_update.py sync_db fix, time-aware routing + trip advisory,
+   route_best_departure(), and this pass's multi-stop trips + evacuation
+   routing).
+3. `frontend/index.html` — the UI for every routing feature above (small
+   enough to call out on its own so a reviewer can see exactly what
+   changed in the demo-facing surface).
 4. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
    compiler.
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "routing: best-departure planner recomputes the actual best route per hour (96->105 tests)"
+git commit -m "routing: multi-stop trip chaining + destination-free evacuation routing (105->126 tests)"
 git push
 ```
 

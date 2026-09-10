@@ -177,6 +177,47 @@ def unsafe_edges(engine, forecast_hour: int, profile: str) -> set[tuple]:
         return {tuple(r) for r in conn.execute(text(sql), {"h": forecast_hour}).all()}
 
 
+def always_safe_nodes(engine, hours, profile: str) -> set[int]:
+    """Every graph node that is an endpoint of at least one segment which
+    stays safe for ``profile`` across EVERY hour in ``hours`` -- candidate
+    "safe haven" points for Router.route_to_safety(): a node qualifies if
+    standing on (or reaching) that one segment keeps a traveler safe for
+    the rest of the modeled window, not just this instant.
+
+    Requires an actual hazard row for every hour in ``hours`` per segment
+    (``COUNT(*) = :n``), not just BOOL_AND over whatever rows happen to
+    exist -- a segment missing a row for one of the requested hours must
+    not be vacuously treated as "safe" that hour just because every row
+    that *does* exist happens to be safe.
+
+    Same profile-name validation as unsafe_edges(): the API layer already
+    checks ``profile`` against the known set, but this is the actual SQL
+    boundary, so it re-checks before interpolating it into a column name.
+    """
+    if profile not in config.DEPTH_LIMIT_M:
+        raise ValueError(f"unknown profile {profile!r}")
+    col = f"safe_{profile}"
+    hour_list = list(hours)
+    if not hour_list:
+        return set()
+    sql = f"""
+    SELECT s.u, s.v FROM segments s
+    WHERE s.segment_id IN (
+        SELECT h.segment_id FROM hazard h
+        WHERE h.forecast_hour = ANY(:hours)
+        GROUP BY h.segment_id
+        HAVING COUNT(*) = :n AND BOOL_AND(h.{col})
+    )
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), {"hours": hour_list, "n": len(hour_list)}).all()
+    nodes: set[int] = set()
+    for u, v in rows:
+        nodes.add(u)
+        nodes.add(v)
+    return nodes
+
+
 def edge_hazard(engine, forecast_hour: int) -> pd.DataFrame:
     """Per-edge max depth and min safety at an hour (for route annotation)."""
     sql = """

@@ -1,6 +1,7 @@
 """Router on a tiny hand-built graph; DB calls are stubbed."""
 import networkx as nx
 import pandas as pd
+import pytest
 
 from tidestep import routing
 
@@ -82,6 +83,27 @@ def test_route_window_never_unsafe(monkeypatch):
     win = R.route_window((0, 0), (0, 0.001), "adult", range(24))
     assert win.first_unsafe_hour is None
     assert win.baseline_length_m == 100
+
+
+class FakeDBWithHavens:
+    """Like FakeDBByHour, plus always_safe_nodes(...) for route_to_safety
+    tests -- a fixed set of node ids treated as safe havens regardless of
+    hour (tests that need per-hour haven variation can subclass)."""
+    def __init__(self, unsafe_by_hour: dict, safe_nodes: set, depth_cm: int = 50):
+        self.unsafe_by_hour = unsafe_by_hour
+        self.safe_nodes = safe_nodes
+        self.depth_cm = depth_cm
+
+    def unsafe_edges(self, engine, hour, profile):
+        return self.unsafe_by_hour.get(hour, set())
+
+    def edge_hazard(self, engine, hour):
+        unsafe = self.unsafe_by_hour.get(hour, set())
+        return pd.DataFrame([{"u": u, "v": v, "key": k, "depth_cm": self.depth_cm}
+                             for u, v, k in unsafe])
+
+    def always_safe_nodes(self, engine, hours, profile):
+        return self.safe_nodes
 
 
 def test_highway_set_handles_list_valued_tags():
@@ -319,3 +341,192 @@ def test_route_best_departure_respects_hour_clamp_at_forecast_horizon(monkeypatc
                                   range(config.MAX_HOUR, config.MAX_HOUR + 1))
     assert plan.hours[0].safe is True
     assert plan.recommended_hour == config.MAX_HOUR
+
+
+# --- route_multi_stop ---------------------------------------------------
+
+def three_stop_graph():
+    """Extends long_detour_graph with a third stop: reaching stop 3 takes
+    long enough (leg 1, ~65.5 min at adult walking speed) to cross from
+    forecast hour 0 into hour 1, and the final leg (3->5) only floods
+    starting hour 1 -- exactly the hour a traveler chaining from leg 1
+    would really start it, even though it looks completely safe if
+    (wrongly) checked at the trip's overall hour-0 departure time."""
+    G = nx.MultiDiGraph(crs="EPSG:4326")
+    pts = {1: (0, 0), 2: (0.01, 0), 3: (0.011, 0), 5: (0.012, 0)}
+    for n, (x, y) in pts.items():
+        G.add_node(n, x=x, y=y)
+
+    def add(u, v, L, hw="residential"):
+        G.add_edge(u, v, key=0, length=L, highway=hw)
+        G.add_edge(v, u, key=0, length=L, highway=hw)
+
+    add(1, 2, 5400)   # leg 1a: ~64 min
+    add(2, 3, 100)    # leg 1b: leg 1 (1->3) totals ~65.5 min, crosses into hour 1
+    add(3, 5, 100)    # leg 2 (3->5): floods starting hour 1
+    return G
+
+
+def test_route_multi_stop_catches_a_leg_that_floods_by_the_time_you_reach_it(monkeypatch):
+    """Checking each leg independently at the trip's overall hour-0
+    departure would say both legs are safe (leg 2, 3->5, isn't flooded at
+    hour 0). But leg 1 alone takes over an hour, so a traveler wouldn't
+    actually reach stop 3 -- and start leg 2 -- until hour 1, by which
+    time leg 2 HAS flooded. route_multi_stop() must catch this by
+    chaining each leg's departure hour from the previous leg's real
+    arrival hour, not repeating the trip's overall departure hour."""
+    G = three_stop_graph()
+    by_hour = {0: set(), 1: {(3, 5, 0), (5, 3, 0)}}
+    monkeypatch.setattr(routing, "db", FakeDBByHour(by_hour, depth_cm=70))
+    R = routing.Router(G, engine=object())
+
+    waypoints = [(0, 0), (0, 0.011), (0, 0.012)]   # origin -> stop 3 -> destination 5
+    plan = R.route_multi_stop(waypoints, "adult", 0)
+
+    assert len(plan.legs) == 1                  # leg 1 (origin -> stop) succeeded
+    assert plan.legs[0].destination_index == 1
+    assert plan.legs[0].departure_hour == 0
+    assert plan.legs[0].arrival_hour == 1       # crossed into hour 1, as designed
+    assert plan.blocked_leg_index == 1          # leg 2 (stop -> destination) is where it fails
+    assert plan.total_length_m is None
+    assert plan.arrival_hour is None
+
+    # sanity check: checking leg 2 in isolation at hour 0 (the naive, wrong
+    # way) WOULD say it's safe -- proving this is a real trap, not an
+    # unreachable edge case
+    naive_leg2 = R.route_time_aware((0, 0.011), (0, 0.012), "adult", 0)
+    assert naive_leg2 is not None
+
+
+def test_route_multi_stop_all_legs_succeed(monkeypatch):
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDB(set()))
+    R = routing.Router(G, engine=object())
+    plan = R.route_multi_stop([(0, 0), (0, 0.001), (0, 0)], "adult", 0)
+    assert plan.blocked_leg_index is None
+    assert len(plan.legs) == 2
+    assert plan.total_length_m == 200
+    assert plan.departure_hour == 0
+    assert plan.arrival_hour == 0    # short trip, never crosses an hour boundary
+
+    gj = R.multi_stop_route_geojson(plan)
+    assert gj["type"] == "FeatureCollection"
+    assert len(gj["features"]) == 2
+    assert gj["properties"]["total_length_m"] == 200
+    assert gj["properties"]["blocked_leg_index"] is None
+
+
+def test_multi_stop_route_geojson_partial_when_blocked(monkeypatch):
+    G = three_stop_graph()
+    by_hour = {0: set(), 1: {(3, 5, 0), (5, 3, 0)}}
+    monkeypatch.setattr(routing, "db", FakeDBByHour(by_hour, depth_cm=70))
+    R = routing.Router(G, engine=object())
+    plan = R.route_multi_stop([(0, 0), (0, 0.011), (0, 0.012)], "adult", 0)
+    gj = R.multi_stop_route_geojson(plan)
+    assert gj["type"] == "FeatureCollection"
+    assert len(gj["features"]) == 1     # only leg 1 completed
+    assert gj["properties"]["blocked_leg_index"] == 1
+    assert gj["properties"]["total_length_m"] is None
+
+
+def test_multi_stop_route_geojson_uses_point_when_a_leg_is_zero_length(monkeypatch):
+    """Two consecutive waypoints that snap to the same graph node produce
+    a zero-length leg -- its GeoJSON Feature must be a Point, not an
+    invalid single-coordinate LineString (found via live testing against
+    the real synthetic scenario, where two requested waypoints happened
+    to snap to the same street node -- the same fix already applied to
+    safe_haven_geojson()'s zero-length 'already safe' case)."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDB(set()))
+    R = routing.Router(G, engine=object())
+    plan = R.route_multi_stop([(0, 0), (0, 0), (0, 0.001)], "adult", 0)
+    assert plan.blocked_leg_index is None
+    assert plan.legs[0].length_m == 0.0
+    gj = R.multi_stop_route_geojson(plan)
+    assert gj["features"][0]["geometry"]["type"] == "Point"
+    assert gj["features"][1]["geometry"]["type"] == "LineString"
+
+
+def test_route_multi_stop_requires_at_least_two_waypoints(monkeypatch):
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDB(set()))
+    R = routing.Router(G, engine=object())
+    with pytest.raises(ValueError):
+        R.route_multi_stop([(0, 0)], "adult", 0)
+
+
+# --- route_to_safety ------------------------------------------------------
+
+def test_route_to_safety_finds_nearest_haven(monkeypatch):
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes={4}))
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res is not None
+    assert res.already_safe is False
+    # shortest path to node 4: 1->2 (100m, direct) then the 2->4 footway
+    # (110m) -- adult profiles can use footways, so this beats 1->3->4
+    # (110+110=220m) even though it's not the "road" route
+    assert res.nodes == [1, 2, 4]
+    assert res.length_m == 210
+
+    gj = R.safe_haven_geojson(res)
+    assert gj["geometry"]["type"] == "LineString"
+    assert gj["properties"]["already_safe"] is False
+
+
+def test_route_to_safety_already_safe_origin(monkeypatch):
+    """If the origin itself snaps to a node that already qualifies as a
+    haven, the result is a zero-length 'you're already safe' answer, not
+    a search for somewhere else to go."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes={1}))
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.already_safe is True
+    assert res.nodes == [1]
+    assert res.length_m == 0.0
+    assert res.arrival_hour == 0
+
+    gj = R.safe_haven_geojson(res)
+    assert gj["geometry"]["type"] == "Point"    # not an invalid 1-point LineString
+
+
+def test_route_to_safety_no_havens_at_all(monkeypatch):
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes=set()))
+    R = routing.Router(G, engine=object())
+    assert R.route_to_safety((0, 0), "adult", 0) is None
+
+
+def test_route_to_safety_returns_none_if_haven_unreachable(monkeypatch):
+    G = nx.MultiDiGraph(crs="EPSG:4326")
+    G.add_node(1, x=0, y=0); G.add_node(2, x=1, y=1)  # disconnected, no edges
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes={2}))
+    R = routing.Router(G, engine=object())
+    assert R.route_to_safety((0, 0), "adult", 0) is None
+
+
+def test_route_to_safety_queries_havens_from_departure_hour_onward(monkeypatch):
+    """always_safe_nodes() must be asked about the window starting at the
+    REQUESTED departure hour through the forecast horizon -- not the
+    whole 0..MAX_HOUR range, which would incorrectly disqualify a node
+    that only floods earlier in the day, before this traveler would even
+    be leaving."""
+    from tidestep import config
+
+    class RecordingHavenDB(FakeDBWithHavens):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls = []
+
+        def always_safe_nodes(self, engine, hours, profile):
+            self.calls.append((list(hours), profile))
+            return super().always_safe_nodes(engine, hours, profile)
+
+    G = square_graph()
+    spy = RecordingHavenDB({}, safe_nodes={4})
+    monkeypatch.setattr(routing, "db", spy)
+    R = routing.Router(G, engine=object())
+    R.route_to_safety((0, 0), "adult", 5)
+    assert spy.calls == [(list(range(5, config.MAX_HOUR + 1)), "adult")]

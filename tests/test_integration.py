@@ -216,6 +216,59 @@ def test_route_best_departure_endpoint_self_consistent_for_vehicle_small(seeded_
         assert rec["length_m"] == body["recommended_length_m"]
 
 
+def test_multi_stop_endpoint_works_against_real_data(seeded_app):
+    """Drives the new POST /api/route/multi_stop endpoint through the real
+    HTTP -> FastAPI -> Router.route_multi_stop -> real Postgres path, with
+    a genuine 3-waypoint trip (adult, which never floods in this
+    scenario, so every leg should succeed)."""
+    client, *_ = seeded_app
+    body = {
+        "waypoints": [
+            {"lat": 40.9, "lon": -73.6998},
+            {"lat": 40.9, "lon": -73.6873},
+            {"lat": 40.9, "lon": -73.6748},
+        ],
+        "profile": "adult", "hour": 0,
+    }
+    r = client.post("/api/route/multi_stop", json=body)
+    assert r.status_code == 200
+    body_out = r.json()
+    assert body_out["type"] == "FeatureCollection"
+    assert body_out["properties"]["blocked_leg_index"] is None
+    assert len(body_out["features"]) == 2
+    assert body_out["properties"]["total_length_m"] is not None
+
+
+def test_multi_stop_endpoint_rejects_bad_profile_against_real_app(seeded_app):
+    client, *_ = seeded_app
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": [{"lat": 40.9, "lon": -73.6998}, {"lat": 40.9, "lon": -73.6748}],
+        "profile": "dog"})
+    assert r.status_code == 400
+
+
+def test_route_to_safety_endpoint_works_against_real_data(seeded_app):
+    """Drives GET /api/route/to_safety through the real app against real
+    loaded data. Doesn't assert a specific destination (that depends on
+    the synthetic scenario's exact topology and which segments happen to
+    stay dry all 24 hours) -- just that the endpoint returns a
+    well-formed, self-consistent answer: either a real Feature with
+    geometry and non-negative length/time, or the honest "no reachable
+    haven" response, never a 500 or a malformed shape."""
+    client, *_ = seeded_app
+    r = client.get("/api/route/to_safety", params=dict(
+        olat=40.9, olon=-73.6998, profile="adult", hour=0))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["type"] == "Feature"
+    if body["geometry"] is not None:
+        assert body["geometry"]["type"] in ("Point", "LineString")
+        assert body["properties"]["length_m"] >= 0
+        assert body["properties"]["travel_time_min"] >= 0
+    else:
+        assert "error" in body["properties"]
+
+
 def test_route_window_matches_per_profile_flood_timing(seeded_app):
     """Cross-check the predictive alert logic (routing.route_window) against
     the hazard table it is supposed to summarize: the first hour it reports

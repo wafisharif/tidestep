@@ -93,6 +93,24 @@ notice. Each one is also called out in the module it applies to.
   floods, so `route_best_departure()` and `route_advisory()` happen to
   agree there — the algorithm's extra value is proven by the controlled
   unit test, not (yet) visible in the synthetic demo data itself.
+- **Multi-stop trips (`Router.route_multi_stop()`, `POST
+  /api/route/multi_stop`) don't re-optimize stop order.** Waypoints are
+  routed in the order given — there's no traveling-salesman-style
+  reordering to find the shortest overall visiting order. For a small
+  number of user-chosen stops (the common case: "school, then the
+  grocery store, then home") this is the right behavior — a user has a
+  reason for their order — but it means the endpoint won't suggest a
+  smarter sequence on its own.
+- **`route_to_safety()`'s "safe haven" is any point that stays flood-safe
+  for the rest of the modeled window** (`db.always_safe_nodes()`) — it is
+  not aware of which of those points are actually meaningful shelter
+  (a school, a firehouse, high ground with parking) versus just a random
+  dry street segment. Distinguishing real shelter locations from merely
+  dry pavement would need a POI dataset this project doesn't currently
+  load. It is also, like the rest of the router, still-water-ponding-only
+  (see "Hydraulic model" above) — it has no concept of which direction a
+  storm is moving or which shelter would still be reachable if conditions
+  worsened beyond what NYOFS currently forecasts.
 - **MVP router is a full graph recompute per query** (networkx Dijkstra
   for the plain router; a hand-rolled Dijkstra over `(elapsed_time, node)`
   state for the time-aware router, run up to once per forecast hour for

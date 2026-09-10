@@ -158,3 +158,54 @@ def test_route_best_departure_valid_request_reaches_the_router(client):
     with pytest.raises(AssertionError):
         client.get("/api/route/best_departure", params=dict(
             olat=40.80, olon=-73.71, dlat=40.81, dlon=-73.70, profile="adult"))
+
+
+def test_multi_stop_rejects_unknown_profile_before_touching_the_database(client):
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70}],
+        "profile": "dog"})
+    assert r.status_code == 400
+    assert "profile" in r.json()["detail"]
+
+
+def test_multi_stop_rejects_fewer_than_two_waypoints(client):
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": [{"lat": 40.80, "lon": -73.71}], "profile": "adult"})
+    assert r.status_code == 422
+
+
+def test_multi_stop_rejects_hour_above_forecast_window(client):
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70}],
+        "profile": "adult", "hour": config.FORECAST_HOURS})
+    assert r.status_code == 422
+
+
+def test_multi_stop_valid_request_reaches_the_router(client):
+    with pytest.raises(AssertionError):
+        client.post("/api/route/multi_stop", json={
+            "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70},
+                         {"lat": 40.82, "lon": -73.69}],
+            "profile": "adult"})
+
+
+def test_route_to_safety_rejects_unknown_profile_before_touching_the_database(client):
+    r = client.get("/api/route/to_safety", params=dict(olat=40.80, olon=-73.71, profile="dog"))
+    assert r.status_code == 400
+    assert "profile" in r.json()["detail"]
+
+
+def test_route_to_safety_requires_coordinates(client):
+    r = client.get("/api/route/to_safety", params=dict(olat=40.80, profile="adult"))
+    assert r.status_code == 422   # olon missing
+
+
+def test_route_to_safety_rejects_hour_above_forecast_window(client):
+    r = client.get("/api/route/to_safety", params=dict(
+        olat=40.80, olon=-73.71, profile="adult", hour=config.FORECAST_HOURS))
+    assert r.status_code == 422
+
+
+def test_route_to_safety_valid_request_reaches_the_router(client):
+    with pytest.raises(AssertionError):
+        client.get("/api/route/to_safety", params=dict(olat=40.80, olon=-73.71, profile="adult"))

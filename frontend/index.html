@@ -31,6 +31,9 @@
   #advisory .strip { display:flex; gap:1px; border-radius:4px; overflow:hidden; height:14px; }
   #advisory .strip span { flex:1; }
   #advisory .caption { font-size:11px; color:var(--muted); margin-top:3px; }
+  .section { margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
+  .section h2 { font-size:12px; font-weight:600; margin:0 0 4px; text-transform:uppercase; letter-spacing:.02em; color:var(--muted); }
+  #tripResult, #safetyResult { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
 </style>
 </head>
 <body>
@@ -60,6 +63,23 @@
   <div id="result"></div>
   <div id="advisory"></div>
 
+  <div class="section">
+    <h2>Multi-stop trip</h2>
+    <label class="checkrow"><input type="checkbox" id="multiStopMode">
+      plan a trip with stops (click map to add each stop)</label>
+    <div class="hint" id="stopsLabel">no stops yet</div>
+    <button id="planTrip" class="secondary">Plan trip</button>
+    <button id="clearStops" class="secondary">Clear stops</button>
+    <div id="tripResult"></div>
+  </div>
+
+  <div class="section">
+    <h2>Evacuate to safety</h2>
+    <div class="hint">Uses the route start point above as your current location.</div>
+    <button id="findSafety" class="secondary">Find nearest safe place</button>
+    <div id="safetyResult"></div>
+  </div>
+
   <div class="legend">
     <span><i class="sw" style="background:#2e7d32"></i>safe</span>
     <span><i class="sw" style="background:#f9a825"></i>flooded, passable</span>
@@ -87,6 +107,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
 let hours = [], hour = 0, riskLayer = null, routeLayer = null;
 let cache = {};          // hour -> geojson
 let start = null, dest = null, startMk = null, destMk = null;
+let stops = [], stopMarkers = [], legLayers = [], safetyLayer = null;
 const $ = id => document.getElementById(id);
 
 function color(p, profile) {
@@ -195,7 +216,89 @@ async function renderAdvisory() {
     (nUnsafe ? ` · unsafe ${nUnsafe} of ${a.hours.length} hours` : ' · safe the whole window') + `</div>`;
 }
 
+// --- multi-stop trip planning ------------------------------------------
+// route_multi_stop() chains time-aware legs, each starting from the
+// PREVIOUS leg's real arrival hour -- see docs/NOVELTY.md. This UI just
+// collects an ordered list of map clicks and posts them as one trip.
+const legColors = ['#0b5fff', '#00897b', '#6a1b9a', '#ef6c00', '#ad1457', '#00838f'];
+
+function addStop(latlng) {
+  stops.push(latlng);
+  const mk = L.circleMarker(latlng, { radius: 6, color: '#6a1b9a', fillColor: '#6a1b9a',
+                                      fillOpacity: 0.9, weight: 2 })
+    .bindTooltip(String(stops.length), { permanent: true, direction: 'top', offset: [0, -6] })
+    .addTo(map);
+  stopMarkers.push(mk);
+  $('stopsLabel').textContent = stops.length === 1
+    ? '1 stop set — add at least one more'
+    : `${stops.length} stops set — ready to plan`;
+}
+
+async function planTrip() {
+  if (stops.length < 2) return;
+  legLayers.forEach(l => map.removeLayer(l)); legLayers = [];
+  const body = { waypoints: stops.map(s => ({ lat: s.lat, lon: s.lng })),
+                profile: $('profile').value, hour };
+  const r = await fetch('/api/route/multi_stop', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const fc = await r.json();
+  fc.features.forEach((f, i) => {
+    const c = legColors[i % legColors.length];
+    legLayers.push(L.geoJSON(f, {
+      style: { color: c, weight: 5, opacity: 0.85 },
+      pointToLayer: (feat, latlng) => L.circleMarker(latlng, { radius: 6, color: c }),
+    }).addTo(map));
+  });
+  const p = fc.properties, el = $('tripResult'); el.style.display = 'block';
+  const km = m => (m / 1000).toFixed(2) + ' km';
+  if (p.blocked_leg_index != null) {
+    el.innerHTML = `<b>Blocked at stop ${p.blocked_leg_index + 2}</b> of ${stops.length} — ` +
+      `no safe route for that leg at the hour you'd actually reach it ` +
+      `(${fc.features.length} of ${stops.length - 1} leg(s) shown are safely reachable).`;
+  } else {
+    el.innerHTML = `<b>${km(p.total_length_m)}</b> total · ~${p.total_travel_time_min} min · ` +
+      `arrives around hour ${p.arrival_hour}.`;
+  }
+}
+
+$('multiStopMode').onchange = () => { $('stopsLabel').textContent = stops.length
+  ? `${stops.length} stop(s) set` : 'no stops yet'; };
+$('planTrip').onclick = planTrip;
+$('clearStops').onclick = () => {
+  stops = []; stopMarkers.forEach(m => map.removeLayer(m)); stopMarkers = [];
+  legLayers.forEach(l => map.removeLayer(l)); legLayers = [];
+  $('stopsLabel').textContent = 'no stops yet'; $('tripResult').style.display = 'none';
+};
+
+// --- evacuate to safety --------------------------------------------------
+// route_to_safety() needs only a starting point -- reuses whatever the
+// route panel's "start" marker is set to, since asking for a second,
+// separate click just to say "here" would be redundant.
+async function findSafety() {
+  if (!start) { $('safetyResult').style.display = 'block';
+    $('safetyResult').innerHTML = 'Click the map to set a starting point first (in the Route section above).';
+    return; }
+  const q = new URLSearchParams({ olat: start.lat, olon: start.lng, profile: $('profile').value, hour });
+  const r = await fetch('/api/route/to_safety?' + q); const f = await r.json();
+  if (safetyLayer) map.removeLayer(safetyLayer);
+  const el = $('safetyResult'); el.style.display = 'block';
+  if (!f.geometry) {
+    el.innerHTML = `<b>No safe place found</b> for this profile anywhere in the forecast window.`;
+    return;
+  }
+  safetyLayer = L.geoJSON(f, {
+    style: { color: '#e65100', weight: 5, opacity: 0.9, dashArray: '6,6' },
+    pointToLayer: (feat, latlng) => L.circleMarker(latlng, { radius: 8, color: '#e65100', fillOpacity: 0.9 }),
+  }).addTo(map);
+  const p = f.properties;
+  el.innerHTML = p.already_safe
+    ? `You're already somewhere that stays safe for the rest of the forecast window.`
+    : `Nearest safe place: <b>${(p.length_m / 1000).toFixed(2)} km</b> away, ~${p.travel_time_min} min.`;
+}
+$('findSafety').onclick = findSafety;
+
 map.on('click', e => {
+  if ($('multiStopMode').checked) { addStop(e.latlng); return; }
   if (!start) { start = e.latlng; startMk = L.marker(start).addTo(map); $('from').value = fmtLL(start); }
   else if (!dest) { dest = e.latlng; destMk = L.marker(dest).addTo(map); $('to').value = fmtLL(dest); route(); }
 });
