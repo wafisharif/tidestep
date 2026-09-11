@@ -1,6 +1,98 @@
 # Status
 
-Updated: 2026-09-10
+Updated: 2026-09-11
+
+## Done (2026-09-11, eighth pass — concurrent-edit collision caught and
+resolved, iOS app brought back to parity with 5 backend passes it had
+missed)
+
+**Heads up for both of you, since this is exactly the kind of thing
+`CLAUDE.md`'s "both teammates run their own Claude session against this
+repo" setup can produce**: this pass started by independently building
+multi-stop routing and a "nearest safe haven" evacuation finder — the same
+two features the *previous* ("seventh pass") entry below already
+describes, which a concurrent session had just finished writing directly
+into `tidestep/routing.py` while this session was mid-edit on the same
+file. The two sets of edits landed interleaved: duplicate `SafeHavenResult`
+class definitions, a duplicate `route_multi_stop` method (Python keeps only
+the last definition of a repeated name, so the second one silently wins),
+and a `route_to_safety()` that would have raised `TypeError` at its first
+real call (it constructs `SafeHavenResult` with keyword arguments that only
+its *original* class definition has, but the redefinition further down the
+file — from this session's competing edit — had already overwritten that
+class with an incompatible, simpler shape). **Caught before anything was
+saved to disk from this session's own separate mistake compounding it
+further** — noticed only because a docstring edit's exact-text match
+failed against what was actually on disk, which prompted a full re-read
+instead of retrying the edit blindly.
+
+- **Resolved by removing this session's duplicate/inferior code and
+  keeping the concurrent session's implementation entirely**, which turned
+  out to be more complete anyway: a single grouped SQL query
+  (`db.always_safe_nodes()`) instead of this session's N-per-hour-queries
+  Python loop for the same "which nodes stay safe all window" computation,
+  full per-leg route geometry for multi-stop trips (this session's
+  competing version only kept summary numbers, no drawable geometry), and
+  already-written frontend/tests/docs to match. Verified clean afterward:
+  every class and method in `tidestep/routing.py` now appears exactly
+  once (`grep -n "^    def \|^class \|^@dataclass"`), the module imports
+  without error, and the full suite passes — **126/126**, unchanged from
+  before this pass touched anything, confirming the cleanup was a pure
+  no-op on top of the concurrent session's already-complete, already-
+  tested work (multi-stop trip chaining + `route_to_safety()` — see the
+  "seventh pass" entry directly below for what that pass actually built).
+- **No feature work was duplicated as a result** — instead, this pass did
+  something the concurrent session's own "Next" list hadn't gotten to:
+  the iOS SwiftUI client (`ios/`) had not been touched since before *any*
+  of passes 4 through 7 (time-aware routing, `route_best_departure()`,
+  multi-stop trips, `route_to_safety()` — five new/changed endpoints,
+  confirmed via file mtimes: every `ios/TideStep/*.swift` file predates
+  all of them), so `docs/NOVELTY.md`'s "cross-platform from day one" claim
+  (item 5: "same routing logic, same data, two real clients") had quietly
+  gone stale. Brought back to parity:
+  - **`Models.swift`**: `RouteProperties` extended with the five
+    time-aware-only fields (`travelTimeMin`, `departureHour`,
+    `arrivalHour`, `hourCrossed`, `timeAware`), all optional so the one
+    struct still decodes both the plain and time-aware response shapes
+    correctly. New `RouteAdvisoryResponse`/`HourAdvisory`,
+    `BestDepartureResponse`/`HourRoute`, `MultiStopFeatureCollection`/
+    `MultiStopLegFeature`/`MultiStopRequest`, and `SafeHavenFeature`/
+    `SafeHavenProperties` structs, every field name matched against
+    `tidestep/api.py`'s actual JSON keys the same way the original models
+    were built. New `RouteOrPointGeometry` enum (mirrors
+    `tidestep/routing.py`'s Point-for-a-zero-length-leg fix from the
+    previous pass) reusing the same manual-decode pattern the original
+    `LineStringGeometry` already established, rather than a new approach.
+  - **`APIClient.swift`**: `route()` gained a `timeAware` parameter
+    (default `false`, so every existing call site is unaffected) plus four
+    new methods — `routeAdvisory()`, `routeBestDeparture()`,
+    `routeMultiStop()`, `routeToSafety()` — one per new endpoint. Header
+    comment's endpoint count corrected from 5 to 11 (`tidestep/api.py`'s
+    actual current route count).
+  - **`TideStepViewModel.swift`** / **`ContentView.swift`** /
+    **`RiskMapView.swift`**: two of the five new endpoints got full UI —
+    a time-aware toggle (mirrors `frontend/index.html`'s checkbox exactly,
+    re-runs the current route under the new mode) and "Evacuate to
+    safety" (a button needing only the already-set start point, drawing a
+    dashed orange line — or a marker for the "already safe" case — to the
+    nearest point that stays flood-safe for the rest of the window).
+    `route/advisory`, `route/best_departure`, and `route/multi_stop` got
+    complete model + API-client support but **no screen yet** — their web
+    equivalents (a 24-cell hour strip, a click-to-add-stop planner) are
+    real UI builds, not extensions of an existing control, and were left
+    for a follow-up rather than rushed with no compiler to check against.
+  - **Verification, honestly scoped**: still no Swift/Xcode toolchain in
+    either Claude sandbox (`docs/STATUS.md`'s standing caveat), so this is
+    reviewed-not-compiled, same as every previous iOS pass. Checked what
+    *can* be checked without one: every new/changed struct's field names
+    and JSON key mappings re-verified against the live `tidestep/api.py`
+    and `tidestep/routing.py` on disk (not memory/assumption), and a
+    brace/paren balance check across all five touched files (naive, but
+    catches gross structural mistakes: `{`/`}` and `(`/`)` counts match in
+    every file).
+  - `ios/README.md` updated: a new "API coverage" section states plainly
+    which endpoints have a screen and which don't, so this doesn't quietly
+    go stale the way the pre-this-pass state did.
 
 ## Done (2026-09-10, seventh pass — two new routing capabilities:
 multi-stop trip chaining and destination-free evacuation routing)
@@ -602,10 +694,15 @@ fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
 
 ## Next (the laptop is now a working environment — these are all runnable
 there today; nothing left is blocked on tooling)
-1. **Commit and push.** This pass's multi-stop trip planner and
-   evacuation-routing work (and everything from every previous pass) is
-   not on `origin/main` yet — see "Uncommitted work" below for the exact
-   commands. Do this first so the fixes above aren't sitting only on disk.
+1. **Commit and push.** This pass's fixes (and everything from every
+   previous pass) is not on `origin/main` yet — see "Uncommitted work"
+   below for the exact commands. Do this first so nothing above is
+   sitting only on disk. **Coordinate with your teammate before this
+   one** — see the eighth pass's concurrent-edit note above: two sessions
+   were mid-edit on `tidestep/routing.py` at once, and this repo's
+   `.git` working tree is shared, so whoever runs `git add`/`commit`
+   first should let the other know, to avoid the same kind of collision
+   happening again at the git layer instead of the filesystem layer.
 1a. Once pushed, feature-work candidates worth considering next (none
    started): (i) **stop-order optimization for multi-stop trips** — right
    now `route_multi_stop()` routes waypoints in the order given; a small
@@ -618,7 +715,11 @@ there today; nothing left is blocked on tooling)
    `route_best_departure()`'s per-hour search from a full 24-hour sweep
    down to only the hours between two changes in safety state, to cut its
    DB-query count if it ever needs to run against a much larger street
-   graph than this bbox's.
+   graph than this bbox's; (iv) **iOS screens for `/api/route/advisory`,
+   `/api/route/best_departure`, and `POST /api/route/multi_stop`** — the
+   eighth pass brought the model/API-client layer to full parity with the
+   backend, but those three endpoints have no SwiftUI screen yet (see
+   `ios/README.md`'s "API coverage" section).
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
@@ -658,23 +759,30 @@ uncommitted (repo policy: Claude never runs `git add`/`commit`/`push` —
 see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
 `docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
 committed and pushed (`8d779c6`, confirmed via `git log origin/main`).
-Everything else described in this file, including this pass's multi-stop
-trip planner and evacuation-routing work, is still local-only. Files
-touched **this pass** (on top of everything already listed as
-uncommitted from earlier passes):
-- Modified: `tidestep/routing.py` (`route_multi_stop`, `route_to_safety`,
-  `multi_stop_route_geojson`, `safe_haven_geojson`, `TripLeg`, `TripPlan`,
-  `SafeHavenResult`), `tidestep/db.py` (new `always_safe_nodes()`),
-  `tidestep/api.py` (new `POST /api/route/multi_stop` and `GET
-  /api/route/to_safety` endpoints), `frontend/index.html` (new
-  "Multi-stop trip" and "Evacuate to safety" panel sections),
-  `tests/test_routing.py` (+10), `tests/test_api.py` (+8),
-  `tests/test_integration.py` (+3), `docs/LIMITATIONS.md` (+2 new
-  caveats), `docs/NOVELTY.md` (+2 entries), `docs/STATUS.md` (this
-  section).
+Everything else described in this file is still local-only. Files touched
+**this pass** (on top of everything already listed as uncommitted from
+earlier passes — the seventh pass's `tidestep/routing.py`/`db.py`/`api.py`/
+`frontend/index.html` changes are already captured in that pass's own
+bullet below and were not modified again by this pass beyond the
+duplicate-code cleanup described above, which nets to no functional
+change):
+- Modified: `tidestep/routing.py` (cleanup only — removed this session's
+  duplicate/inferior classes and methods that collided with the seventh
+  pass's; net content after cleanup is identical to what the seventh pass
+  already produced), `ios/TideStep/Models.swift`, `ios/TideStep/APIClient.swift`,
+  `ios/TideStep/TideStepViewModel.swift`, `ios/TideStep/ContentView.swift`,
+  `ios/TideStep/RiskMapView.swift`, `ios/README.md`, `docs/STATUS.md`
+  (this section).
+- From the seventh pass (already uncommitted, unchanged by this pass):
+  `tidestep/db.py` (new `always_safe_nodes()`), `tidestep/api.py` (new
+  `POST /api/route/multi_stop` and `GET /api/route/to_safety` endpoints),
+  `frontend/index.html` (new "Multi-stop trip" and "Evacuate to safety"
+  panel sections), `tests/test_routing.py` (+10), `tests/test_api.py`
+  (+8), `tests/test_integration.py` (+3), `docs/LIMITATIONS.md` (+2 new
+  caveats), `docs/NOVELTY.md` (+2 entries).
 - Everything else previously listed here (from the six earlier passes:
   `README.md`, `tidestep/config.py`, `tidestep/segments.py`,
-  `scripts/build_hazard.py`, `scripts/hourly_update.py`, `ios/`,
+  `scripts/build_hazard.py`, `scripts/hourly_update.py`,
   `requirements-dev.txt`, `scripts/dev_seed.py`,
   `scripts/validate_stage9.py`, `tidestep/validate.py`, and every earlier
   new test file) is still uncommitted too — nothing described anywhere

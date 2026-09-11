@@ -141,7 +141,14 @@ tool nobody had packaged this way for this problem.
    (`tidestep/api.py`) is the single source of truth for both the Leaflet
    web frontend and the native SwiftUI iOS app (`ios/`) — same hazard
    colors, same routing logic, same data, two real clients, not a web demo
-   with an iOS mockup bolted on.
+   with an iOS mockup bolted on. Kept honest as the backend grew: five new
+   endpoints were added across later passes (time-aware routing,
+   best-departure planning, trip advisory, multi-stop trips, evacuation
+   routing) before the iOS client caught up to any of them — the eighth
+   pass closed that gap at the model/API-client layer for all five and
+   built full screens for two (the time-aware toggle and "Evacuate to
+   safety"), with the remaining three tracked openly in `ios/README.md`
+   rather than left to look finished when they weren't.
 6. **Time-expanded routing, not a static-weight shortcut.** Nearly every
    flood-routing demo (including TideStep's own first version) checks
    hazard once at departure and calls it done — reasonable when a trip is

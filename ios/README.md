@@ -85,10 +85,42 @@ map, slider, and per-profile routing all work identically against
 synthetic data — useful for rehearsing the demo without depending on NOAA
 being reachable at that moment.
 
+## API coverage
+
+`APIClient.swift` and `Models.swift` cover all 11 JSON endpoints
+`tidestep/api.py` exposes, kept in sync as the backend grew across several
+passes (see `docs/STATUS.md`): `/api/config`, `/api/hours`, `/api/risk`,
+`/api/route` (including `time_aware=true`), `/api/route/advisory`,
+`/api/route/best_departure`, `POST /api/route/multi_stop`,
+`GET /api/route/to_safety`, and the saved-routes CRUD trio. UI wiring in
+`ContentView.swift`/`RiskMapView.swift`/`TideStepViewModel.swift` covers the
+original map/routing/saved-routes flow, the "check hazard at actual
+arrival time" time-aware toggle, and "Evacuate to safety" (a button that
+reuses the already-set start point, no destination needed, drawing a
+dashed orange line — or a marker for the already-safe case — to the
+nearest point that stays flood-safe for the rest of the forecast window).
+**Not yet built as a screen**: `/api/route/advisory`, `/api/route/best_departure`,
+and `POST /api/route/multi_stop` have complete, matched-field-for-field
+model/API-client support (`RouteAdvisoryResponse`, `BestDepartureResponse`,
+`MultiStopFeatureCollection`, `MultiStopRequest`) ready to call, but no
+SwiftUI screen calls them yet — the web frontend's equivalents (the
+24-cell hour strip with a "best time to leave" callout, and the
+click-to-add-stop multi-stop planner) are meaningfully more involved UI
+than the time-aware toggle or the safety button, and were left for a
+follow-up pass rather than rushed without a compiler to check the result
+against.
+
 ## Known gaps / next steps
 
 - **Not compiled yet** (see above) — this is the top priority before
-  relying on it for a demo.
+  relying on it for a demo. This applies doubly to the newest additions
+  (the time-aware toggle and "Evacuate to safety") — reviewed line by line
+  against `tidestep/api.py`'s and `tidestep/routing.py`'s actual JSON
+  shapes and against `frontend/index.html`'s equivalent behavior, brace-
+  and paren-balance-checked, but never built.
+- **`RouteAdvisoryResponse`, `BestDepartureResponse`, and
+  `MultiStopFeatureCollection` have no screen yet** — see "API coverage"
+  above. Building those three is the natural next iOS-specific task.
 - No offline caching beyond the in-memory per-hour risk cache
   (`TideStepViewModel.riskCache`) — closing the app loses it. Fine for a
   demo, worth a `URLCache`/on-disk cache for a real 2.0.

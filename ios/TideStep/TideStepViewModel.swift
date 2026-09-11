@@ -33,6 +33,21 @@ final class TideStepViewModel: ObservableObject {
     @Published var destination: CLLocationCoordinate2D?
     @Published var currentRoute: RouteFeature?
     @Published var routeErrorMessage: String?
+    /// Mirrors frontend/index.html's "check hazard at actual arrival time,
+    /// not just departure" checkbox — when on, findRoute() calls
+    /// Router.route_time_aware via /api/route?time_aware=true instead of
+    /// the departure-hour-only default.
+    @Published var timeAware: Bool = false
+
+    // "Evacuate to safety" (Router.route_to_safety) — a destination-free
+    // routing mode: given only vm.origin, find the nearest point that
+    // stays flood-safe for the rest of the forecast window. Kept as its
+    // own published state rather than reusing currentRoute/destination,
+    // since it answers a different question (no chosen destination) and
+    // the web frontend's "Evacuate to safety" panel keeps it separate too.
+    @Published var safeHaven: SafeHavenFeature?
+    @Published var safetyErrorMessage: String?
+    @Published var isFindingSafety = false
 
     // Saved routes
     @Published var savedRoutes: [SavedRoute] = []
@@ -136,6 +151,7 @@ final class TideStepViewModel: ObservableObject {
         destination = nil
         currentRoute = nil
         routeErrorMessage = nil
+        clearSafety()   // safeHaven is always relative to `origin`, which just cleared
     }
 
     func findRoute() async {
@@ -143,13 +159,53 @@ final class TideStepViewModel: ObservableObject {
         do {
             let result = try await api.route(
                 from: (o.latitude, o.longitude), to: (d.latitude, d.longitude),
-                profile: profile, hour: hourIndex)
+                profile: profile, hour: hourIndex, timeAware: timeAware)
             currentRoute = result
             routeErrorMessage = result.hasRoute ? nil : (result.properties.error ?? "No safe route at this hour.")
         } catch {
             currentRoute = nil
             routeErrorMessage = "Route request failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Called when the user flips the time-aware toggle — re-runs the
+    /// current route (if one is set) under the new mode, same as the web
+    /// frontend's `$('timeAware').onchange = route`.
+    func setTimeAware(_ value: Bool) {
+        timeAware = value
+        if origin != nil && destination != nil { Task { await findRoute() } }
+    }
+
+    // MARK: - Evacuate to safety
+
+    /// Finds the nearest point reachable from `origin` that stays
+    /// flood-safe for `profile` across the rest of the forecast window
+    /// (Router.route_to_safety), and stores it in `safeHaven` for
+    /// RiskMapView to draw. Needs only vm.origin — unlike findRoute(),
+    /// there is no destination to pick, which is the entire point of this
+    /// feature (see docs/NOVELTY.md's "get me to safety" entry).
+    func findSafety() async {
+        guard let o = origin else {
+            safetyErrorMessage = "Tap the map to set a starting point first."
+            return
+        }
+        isFindingSafety = true
+        defer { isFindingSafety = false }
+        do {
+            let result = try await api.routeToSafety(
+                from: (o.latitude, o.longitude), profile: profile, hour: hourIndex)
+            safeHaven = result
+            safetyErrorMessage = result.found ? nil
+                : (result.properties.error ?? "No reachable safe haven found for this profile.")
+        } catch {
+            safeHaven = nil
+            safetyErrorMessage = "Safety request failed: \(error.localizedDescription)"
+        }
+    }
+
+    func clearSafety() {
+        safeHaven = nil
+        safetyErrorMessage = nil
     }
 
     // MARK: - Saved routes

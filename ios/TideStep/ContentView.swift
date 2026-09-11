@@ -77,6 +77,15 @@ struct ContentView: View {
             Text("Tap the map to set a start point, tap again for a destination.")
                 .font(.caption2).foregroundStyle(.secondary)
 
+            Toggle(isOn: Binding(
+                get: { vm.timeAware },
+                set: { vm.setTimeAware($0) }
+            )) {
+                Text("check hazard at actual arrival time, not just departure")
+                    .font(.caption2)
+            }
+            .toggleStyle(.switch)
+
             if let err = vm.routeErrorMessage {
                 Text(err).font(.caption).foregroundStyle(.red)
             } else if let route = vm.currentRoute, route.hasRoute {
@@ -92,6 +101,8 @@ struct ContentView: View {
                 }
             }
 
+            evacuateToSafety
+
             legend
         }
         .padding(12)
@@ -101,23 +112,81 @@ struct ContentView: View {
     }
 
     private func routeSummary(_ route: RouteFeature) -> some View {
-        let km = (route.properties.lengthM ?? 0) / 1000
+        let p = route.properties
+        let km = (p.lengthM ?? 0) / 1000
         return VStack(alignment: .leading, spacing: 2) {
-            Text(String(format: "%.2f km", km)).font(.subheadline.bold())
-            if route.properties.baselineBlocked == true {
-                let baseKm = (route.properties.baselineLengthM ?? 0) / 1000
-                Text(String(format: "Usual route (%.2f km) is flooded — this detour avoids %d unsafe edges.",
-                           baseKm, route.properties.avoidedEdges ?? 0))
-                    .font(.caption)
+            if p.timeAware == true {
+                // time-aware mode: no baseline/avoided-edges (those are
+                // departure-hour concepts) -- show travel time and whether
+                // the trip crosses into a later forecast hour, matching
+                // frontend/index.html's route() timeAware branch.
+                Text(String(format: "%.2f km · ~%.1f min", km, p.travelTimeMin ?? 0))
+                    .font(.subheadline.bold())
+                if p.hourCrossed == true {
+                    Text("Arrives around hour \(p.arrivalHour ?? 0) (later than departure hour \(p.departureHour ?? 0)); "
+                         + "hazard was checked for each segment at the hour you'd actually reach it.")
+                        .font(.caption)
+                } else {
+                    Text("Arrives within the same forecast hour.").font(.caption)
+                }
             } else {
-                Text("Usual route is clear at this hour.").font(.caption)
+                Text(String(format: "%.2f km", km)).font(.subheadline.bold())
+                if p.baselineBlocked == true {
+                    let baseKm = (p.baselineLengthM ?? 0) / 1000
+                    Text(String(format: "Usual route (%.2f km) is flooded — this detour avoids %d unsafe edges.",
+                               baseKm, p.avoidedEdges ?? 0))
+                        .font(.caption)
+                } else {
+                    Text("Usual route is clear at this hour.").font(.caption)
+                }
             }
-            if let depth = route.properties.maxDepthCmOnRoute, depth > 0 {
+            if let depth = p.maxDepthCmOnRoute, depth > 0 {
                 Text("Deepest water on route: \(depth) cm").font(.caption)
             }
         }
         .padding(6)
         .background(Color.gray.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// "Evacuate to safety" (Router.route_to_safety, GET
+    /// /api/route/to_safety) — reuses whatever start point is already set
+    /// above; needs no destination, which is the point of the feature.
+    /// Matches frontend/index.html's "Evacuate to safety" panel.
+    private var evacuateToSafety: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                Task { await vm.findSafety() }
+            } label: {
+                if vm.isFindingSafety {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Text("Evacuate to safety")
+                }
+            }
+            .font(.caption)
+            .disabled(vm.isFindingSafety)
+
+            if let err = vm.safetyErrorMessage {
+                Text(err).font(.caption2).foregroundStyle(.red)
+            } else if let haven = vm.safeHaven, haven.found {
+                safetySummary(haven.properties)
+            }
+        }
+    }
+
+    private func safetySummary(_ p: SafeHavenProperties) -> some View {
+        Group {
+            if p.alreadySafe == true {
+                Text("You're already somewhere that stays safe for the rest of the forecast.")
+                    .font(.caption2)
+            } else {
+                let km = (p.lengthM ?? 0) / 1000
+                Text(String(format: "Nearest safe haven: %.2f km, ~%.1f min away.",
+                           km, p.travelTimeMin ?? 0))
+                    .font(.caption2)
+            }
+        }
+        .foregroundStyle(.secondary)
     }
 
     private var legend: some View {

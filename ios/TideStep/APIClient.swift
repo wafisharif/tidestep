@@ -4,7 +4,7 @@
 //
 //  Thin async/await wrapper over the FastAPI backend (tidestep/api.py).
 //  No third-party networking library — URLSession is plenty for this
-//  surface (5 endpoints, all JSON).
+//  surface (11 endpoints, all JSON).
 
 import Foundation
 
@@ -110,13 +110,72 @@ final class APIClient {
         try await get("/api/risk", query: [URLQueryItem(name: "hour", value: String(hour))])
     }
 
+    /// - Parameter timeAware: when true, hazard is checked at each
+    ///   segment's own arrival hour (based on travel time) instead of
+    ///   once at departure (Router.route_time_aware) — defaults to false,
+    ///   the original behavior, so existing call sites are unaffected.
     func route(from origin: (lat: Double, lon: Double), to destination: (lat: Double, lon: Double),
-              profile: Profile, hour: Int) async throws -> RouteFeature {
+              profile: Profile, hour: Int, timeAware: Bool = false) async throws -> RouteFeature {
         try await get("/api/route", query: [
             URLQueryItem(name: "olat", value: String(origin.lat)),
             URLQueryItem(name: "olon", value: String(origin.lon)),
             URLQueryItem(name: "dlat", value: String(destination.lat)),
             URLQueryItem(name: "dlon", value: String(destination.lon)),
+            URLQueryItem(name: "profile", value: profile.rawValue),
+            URLQueryItem(name: "hour", value: String(hour)),
+            URLQueryItem(name: "time_aware", value: timeAware ? "true" : "false"),
+        ])
+    }
+
+    /// Hour-by-hour safe/unsafe forecast for this trip's usual (flood-blind)
+    /// path across the whole forecast window (Router.route_advisory).
+    func routeAdvisory(from origin: (lat: Double, lon: Double), to destination: (lat: Double, lon: Double),
+                       profile: Profile) async throws -> RouteAdvisoryResponse {
+        try await get("/api/route/advisory", query: [
+            URLQueryItem(name: "olat", value: String(origin.lat)),
+            URLQueryItem(name: "olon", value: String(origin.lon)),
+            URLQueryItem(name: "dlat", value: String(destination.lat)),
+            URLQueryItem(name: "dlon", value: String(destination.lon)),
+            URLQueryItem(name: "profile", value: profile.rawValue),
+        ])
+    }
+
+    /// Per-hour ACTUAL best route across the forecast window, plus the
+    /// earliest hour a real route exists at all (Router.route_best_departure)
+    /// — can find a safe detour at an hour routeAdvisory() would call
+    /// unsafe because its one fixed path floods.
+    func routeBestDeparture(from origin: (lat: Double, lon: Double), to destination: (lat: Double, lon: Double),
+                            profile: Profile) async throws -> BestDepartureResponse {
+        try await get("/api/route/best_departure", query: [
+            URLQueryItem(name: "olat", value: String(origin.lat)),
+            URLQueryItem(name: "olon", value: String(origin.lon)),
+            URLQueryItem(name: "dlat", value: String(destination.lat)),
+            URLQueryItem(name: "dlon", value: String(destination.lon)),
+            URLQueryItem(name: "profile", value: profile.rawValue),
+        ])
+    }
+
+    /// Flood-avoiding route through an ordered list of 2-10 waypoints,
+    /// where each leg's hazard check starts from the PREVIOUS leg's
+    /// actual arrival hour, not the trip's overall departure hour
+    /// repeated for every leg (Router.route_multi_stop).
+    func routeMultiStop(waypoints: [(lat: Double, lon: Double)], profile: Profile,
+                        hour: Int) async throws -> MultiStopFeatureCollection {
+        let body = MultiStopRequest(
+            waypoints: waypoints.map { MultiStopRequest.WaypointBody(lat: $0.lat, lon: $0.lon) },
+            profile: profile.rawValue, hour: hour)
+        return try await send("POST", "/api/route/multi_stop", body: body)
+    }
+
+    /// Evacuation-style routing: given only a starting point (no
+    /// destination), find the nearest reachable point that stays
+    /// flood-safe for the rest of the forecast window and route there
+    /// (Router.route_to_safety).
+    func routeToSafety(from origin: (lat: Double, lon: Double), profile: Profile,
+                       hour: Int) async throws -> SafeHavenFeature {
+        try await get("/api/route/to_safety", query: [
+            URLQueryItem(name: "olat", value: String(origin.lat)),
+            URLQueryItem(name: "olon", value: String(origin.lon)),
             URLQueryItem(name: "profile", value: profile.rawValue),
             URLQueryItem(name: "hour", value: String(hour)),
         ])
