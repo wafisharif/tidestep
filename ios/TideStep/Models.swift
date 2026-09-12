@@ -359,6 +359,14 @@ struct MultiStopTripProperties: Codable {
     let departureHour: Int
     let arrivalHour: Int?
     let maxDepthCmOnRoute: Int
+    // Present only when the request set optimize_order=true
+    // (Router.route_multi_stop_optimized) -- absent (nil) for a plain
+    // multi_stop request, same as the Python response only adds these
+    // keys in that branch (tidestep/api.py: post_route_multi_stop).
+    let order: [Int]?
+    let optimized: Bool?
+    let ordersTried: Int?
+    let ordersComplete: Int?
 
     enum CodingKeys: String, CodingKey {
         case blockedLegIndex = "blocked_leg_index"
@@ -367,6 +375,9 @@ struct MultiStopTripProperties: Codable {
         case departureHour = "departure_hour"
         case arrivalHour = "arrival_hour"
         case maxDepthCmOnRoute = "max_depth_cm_on_route"
+        case order, optimized
+        case ordersTried = "orders_tried"
+        case ordersComplete = "orders_complete"
     }
 }
 
@@ -379,11 +390,21 @@ struct MultiStopFeatureCollection: Codable {
 
 /// Request body for POST /api/route/multi_stop (tidestep/api.py's
 /// MultiStopRequest/Waypoint pydantic models) — 2-10 ordered waypoints.
+/// optimizeOrder mirrors the same field on the Python model: when true,
+/// the backend searches for the best order to visit the INTERMEDIATE
+/// stops in (origin/destination stay fixed), capped at
+/// routing.MAX_OPTIMIZE_STOPS (6) intermediate stops server-side.
 struct MultiStopRequest: Encodable {
     struct WaypointBody: Encodable { let lat: Double; let lon: Double }
     let waypoints: [WaypointBody]
     let profile: String
     let hour: Int
+    let optimizeOrder: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case waypoints, profile, hour
+        case optimizeOrder = "optimize_order"
+    }
 }
 
 // MARK: - GET /api/route/to_safety — a single GeoJSON Feature (Point for

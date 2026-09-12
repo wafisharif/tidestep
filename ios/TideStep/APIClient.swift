@@ -159,11 +159,16 @@ final class APIClient {
     /// where each leg's hazard check starts from the PREVIOUS leg's
     /// actual arrival hour, not the trip's overall departure hour
     /// repeated for every leg (Router.route_multi_stop).
+    ///
+    /// - Parameter optimizeOrder: when true, searches for the best order
+    ///   to visit the intermediate stops in instead of the order given
+    ///   (Router.route_multi_stop_optimized) — defaults to false, the
+    ///   original behavior, so existing call sites are unaffected.
     func routeMultiStop(waypoints: [(lat: Double, lon: Double)], profile: Profile,
-                        hour: Int) async throws -> MultiStopFeatureCollection {
+                        hour: Int, optimizeOrder: Bool = false) async throws -> MultiStopFeatureCollection {
         let body = MultiStopRequest(
             waypoints: waypoints.map { MultiStopRequest.WaypointBody(lat: $0.lat, lon: $0.lon) },
-            profile: profile.rawValue, hour: hour)
+            profile: profile.rawValue, hour: hour, optimizeOrder: optimizeOrder)
         return try await send("POST", "/api/route/multi_stop", body: body)
     }
 

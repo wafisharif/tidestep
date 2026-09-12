@@ -27,6 +27,19 @@ enum HazardColor {
         guard props.flooded else { return safe }
         return props.isSafe(for: profile) ? passable : unsafe
     }
+
+    // Multi-stop trip leg colors, matching frontend/index.html's
+    // `legColors` array exactly (cycled by leg index).
+    static let legColors: [Color] = [
+        route,
+        Color(red: 0x00 / 255, green: 0x89 / 255, blue: 0x7b / 255),
+        Color(red: 0x6a / 255, green: 0x1b / 255, blue: 0x9a / 255),
+        Color(red: 0xef / 255, green: 0x6c / 255, blue: 0x00 / 255),
+        Color(red: 0xad / 255, green: 0x14 / 255, blue: 0x57 / 255),
+        Color(red: 0x00 / 255, green: 0x83 / 255, blue: 0x8f / 255),
+    ]
+
+    static func forLeg(_ index: Int) -> Color { legColors[index % legColors.count] }
 }
 
 struct RiskMapView: View {
@@ -67,6 +80,31 @@ struct RiskMapView: View {
                 if let d = vm.destination {
                     Marker("Destination", coordinate: d).tint(.blue)
                 }
+                // Multi-stop trip: ordered stop markers (purple, matching
+                // frontend/index.html's stop markers), numbered by tap
+                // order -- drawn whenever there are stops, even before a
+                // plan has been computed, so the user sees what they've
+                // tapped so far.
+                ForEach(Array(vm.stops.enumerated()), id: \.offset) { index, coordinate in
+                    Marker("Stop \(index + 1)", coordinate: coordinate)
+                        .tint(HazardColor.forLeg(2))
+                }
+                // Multi-stop trip result: one polyline (or point, for a
+                // zero-length leg) per completed leg, colored by leg index
+                // via the same cycling palette as the web frontend's
+                // `legColors`.
+                if let trip = vm.tripPlan {
+                    ForEach(trip.features) { leg in
+                        switch leg.geometry {
+                        case .line(let g):
+                            MapPolyline(coordinates: g.coordinates)
+                                .stroke(HazardColor.forLeg(leg.properties.legIndex), lineWidth: 5)
+                        case .point(let coord):
+                            Marker("Leg \(leg.properties.legIndex + 1)", coordinate: coord)
+                                .tint(HazardColor.forLeg(leg.properties.legIndex))
+                        }
+                    }
+                }
             }
             .mapStyle(.standard(elevation: .flat))
             // SpatialTapGesture (not the plain .onTapGesture(perform:) that
@@ -76,7 +114,11 @@ struct RiskMapView: View {
             .gesture(
                 SpatialTapGesture().onEnded { value in
                     if let coordinate = proxy.convert(value.location, from: .local) {
-                        vm.setTapPoint(coordinate)
+                        if vm.multiStopMode {
+                            vm.addStop(coordinate)
+                        } else {
+                            vm.setTapPoint(coordinate)
+                        }
                     }
                 }
             )

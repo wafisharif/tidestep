@@ -27,10 +27,17 @@ answers a different kind of question from every method above -- not "get
 me to THIS destination" but "get me to safety" -- by searching for the
 nearest reachable point that stays flood-safe for the rest of the forecast
 window, with no destination required.
+
+``route_multi_stop_optimized()`` goes one step further than
+``route_multi_stop()``: instead of visiting the given waypoints in the
+order they were listed, it brute-forces the best order for the
+INTERMEDIATE stops (origin and final destination stay fixed), scoring
+only orders where every leg actually succeeds, by total travel time.
 """
 from __future__ import annotations
 
 import heapq
+import itertools
 from dataclasses import dataclass
 
 import networkx as nx
@@ -44,6 +51,13 @@ from . import config, db
 NON_DRIVABLE = {"footway", "path", "steps", "cycleway", "pedestrian",
                 "bridleway", "corridor", "track"}
 VEHICLE_PROFILES = {"vehicle_small", "vehicle_large", "vehicle_4wd"}
+
+# route_multi_stop_optimized() brute-forces every permutation of the
+# intermediate stops. 6! = 720 permutations (each a handful of
+# route_time_aware() searches) is fast at this bbox's scale; beyond that
+# the combinatorics stop being worth brute-forcing without a real TSP
+# heuristic, so the method refuses rather than silently taking minutes.
+MAX_OPTIMIZE_STOPS = 6
 
 
 def _highway_set(data) -> set[str]:
@@ -182,6 +196,27 @@ class TripPlan:
     departure_hour: int
     arrival_hour: int | None
     max_depth_cm_on_route: int         # deepest water crossed on any completed leg
+
+
+@dataclass
+class OptimizedTripPlan:
+    """Result of Router.route_multi_stop_optimized(): the best-order plan
+    found among the visiting orders that were tried, plus enough
+    bookkeeping to tell a caller whether reordering actually happened and
+    how thorough the search was.
+
+    ``order`` is a list of indices into the ORIGINAL waypoints list, in
+    the order actually used for ``plan`` -- always starts with 0 and ends
+    with len(waypoints)-1 (origin and destination are never reordered).
+    ``optimized`` is False when nothing was reordered: either there were
+    too few intermediate stops to matter, or no visiting order let every
+    leg succeed, in which case ``plan`` is the original given order's
+    result rather than a guess at which failure is "best"."""
+    plan: TripPlan
+    order: list[int]
+    optimized: bool
+    orders_tried: int
+    orders_complete: int    # how many of the tried orders had every leg succeed
 
 
 @dataclass
@@ -602,6 +637,74 @@ class Router:
                 "max_depth_cm_on_route": plan.max_depth_cm_on_route,
             },
         }
+
+    def route_multi_stop_optimized(self, waypoints: list[tuple[float, float]], profile: str,
+                                   departure_hour: int) -> OptimizedTripPlan:
+        """Like route_multi_stop(), but also searches for the best ORDER
+        to visit the intermediate stops in. The origin (waypoints[0]) and
+        final destination (waypoints[-1]) stay fixed; everything between
+        them is free to reorder -- "start at home, run these errands in
+        whatever order gets you done fastest, end at work", not "run them
+        in the exact order you happened to list them."
+
+        Brute-forces every permutation of the intermediate stops (capped
+        at MAX_OPTIMIZE_STOPS -- see its module-level comment), scoring
+        only the orders where every leg actually succeeds (no
+        blocked_leg_index) by total travel time, with total length as a
+        tiebreaker. Reuses route_multi_stop() for each candidate order
+        rather than a new implementation, so this method's correctness
+        rests entirely on route_multi_stop()'s already-tested per-leg
+        arrival-hour chaining -- it only adds the search over orders.
+
+        If no order has every leg succeed, the ORIGINAL given order's
+        plan is returned unchanged (optimized=False) rather than
+        guessing: picking "the order that gets furthest before blocking"
+        would need its own scoring rule for partial trips, and isn't
+        obviously better than just preserving what the caller asked for.
+        """
+        if len(waypoints) < 2:
+            raise ValueError("route_multi_stop_optimized needs at least 2 waypoints "
+                             "(origin + destination)")
+        n_intermediate = len(waypoints) - 2
+        if n_intermediate > MAX_OPTIMIZE_STOPS:
+            raise ValueError(
+                f"can only optimize up to {MAX_OPTIMIZE_STOPS} intermediate stops "
+                f"({n_intermediate} given) -- brute-forcing every order stops being "
+                f"cheap past that")
+
+        identity_order = list(range(len(waypoints)))
+        if n_intermediate <= 1:
+            # 0 or 1 intermediate stop: only one possible visiting order,
+            # nothing to search for.
+            plan = self.route_multi_stop(waypoints, profile, departure_hour)
+            complete = 1 if plan.blocked_leg_index is None else 0
+            return OptimizedTripPlan(plan=plan, order=identity_order, optimized=False,
+                                     orders_tried=1, orders_complete=complete)
+
+        middle = list(range(1, len(waypoints) - 1))
+        best: tuple[float, float, list[int], TripPlan] | None = None
+        orders_tried = 0
+        orders_complete = 0
+        for perm in itertools.permutations(middle):
+            order = [0, *perm, len(waypoints) - 1]
+            pts = [waypoints[i] for i in order]
+            plan = self.route_multi_stop(pts, profile, departure_hour)
+            orders_tried += 1
+            if plan.blocked_leg_index is not None:
+                continue
+            orders_complete += 1
+            key = (plan.total_travel_time_min, plan.total_length_m)
+            if best is None or key < (best[0], best[1]):
+                best = (plan.total_travel_time_min, plan.total_length_m, order, plan)
+
+        if best is None:
+            fallback = self.route_multi_stop(waypoints, profile, departure_hour)
+            return OptimizedTripPlan(plan=fallback, order=identity_order, optimized=False,
+                                     orders_tried=orders_tried, orders_complete=0)
+
+        _, _, order, plan = best
+        return OptimizedTripPlan(plan=plan, order=order, optimized=(order != identity_order),
+                                 orders_tried=orders_tried, orders_complete=orders_complete)
 
     def route_to_safety(self, origin: tuple[float, float], profile: str,
                         departure_hour: int) -> SafeHavenResult | None:

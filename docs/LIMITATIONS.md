@@ -94,13 +94,20 @@ notice. Each one is also called out in the module it applies to.
   agree there — the algorithm's extra value is proven by the controlled
   unit test, not (yet) visible in the synthetic demo data itself.
 - **Multi-stop trips (`Router.route_multi_stop()`, `POST
-  /api/route/multi_stop`) don't re-optimize stop order.** Waypoints are
-  routed in the order given — there's no traveling-salesman-style
-  reordering to find the shortest overall visiting order. For a small
-  number of user-chosen stops (the common case: "school, then the
-  grocery store, then home") this is the right behavior — a user has a
-  reason for their order — but it means the endpoint won't suggest a
-  smarter sequence on its own.
+  /api/route/multi_stop`) route waypoints in the order given by default.**
+  For a small number of user-chosen stops (the common case: "school, then
+  the grocery store, then home") this is the right default — a user
+  usually has a reason for their order. **Opt-in reordering now exists**:
+  `optimize_order=true` (`Router.route_multi_stop_optimized()`)
+  brute-forces every visiting order of the intermediate stops (origin and
+  final destination stay fixed) and picks the fastest one where every leg
+  actually succeeds, capped at `routing.MAX_OPTIMIZE_STOPS` (6)
+  intermediate stops — beyond that, 7!+ permutations stop being cheap to
+  brute-force and the endpoint refuses rather than silently taking a long
+  time. This is exhaustive search, not a real TSP heuristic (fine at this
+  cap; would need one past it), and it optimizes total travel time only —
+  it has no concept of appointment times or stop-specific time windows
+  ("must be at the pharmacy before it closes at 6").
 - **`route_to_safety()`'s "safe haven" is any point that stays flood-safe
   for the rest of the modeled window** (`db.always_safe_nodes()`) — it is
   not aware of which of those points are actually meaningful shelter

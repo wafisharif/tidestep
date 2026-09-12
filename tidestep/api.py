@@ -24,7 +24,10 @@ GET  /api/route/best_departure?olat&olon&dlat&dlon&profile
 POST /api/route/multi_stop              flood-avoiding route through an ordered list of 2+
                                          waypoints (JSON body), where each leg's hazard check
                                          starts from the PREVIOUS leg's actual arrival hour, not
-                                         hour 0 repeated for every leg (Router.route_multi_stop)
+                                         hour 0 repeated for every leg (Router.route_multi_stop).
+                                         optimize_order=true additionally searches for the best
+                                         order to visit the intermediate stops in, instead of the
+                                         order given (Router.route_multi_stop_optimized)
 GET  /api/route/to_safety?olat&olon&profile&hour
                                          evacuation-style routing: nearest reachable point that
                                          stays flood-safe for the rest of the forecast window, no
@@ -195,6 +198,11 @@ class MultiStopRequest(BaseModel):
         description="ordered stops: origin, any intermediate stops, final destination")
     profile: str = "adult"
     hour: int = Field(0, ge=0, le=config.MAX_HOUR, description="departure hour for the first leg")
+    optimize_order: bool = Field(
+        False, description="find the best order to visit the intermediate stops in "
+                           "(origin and final destination stay fixed), instead of "
+                           "visiting them in the order given -- capped at "
+                           f"{routing.MAX_OPTIMIZE_STOPS} intermediate stops")
 
 
 @app.post("/api/route/multi_stop")
@@ -205,10 +213,38 @@ def post_route_multi_stop(req: MultiStopRequest):
     hour, not the trip's overall departure hour repeated for every leg
     independently (which would repeat, one level up, the exact mistake
     time-aware routing was built to fix for a single leg). See
-    Router.route_multi_stop for the constructed case this matters for."""
+    Router.route_multi_stop for the constructed case this matters for.
+
+    ``optimize_order=true`` additionally searches for the best order to
+    visit the intermediate stops in, rather than the order given -- see
+    Router.route_multi_stop_optimized. The response gains ``order``
+    (the waypoint-index visiting order actually used), ``optimized``,
+    ``orders_tried``, and ``orders_complete`` properties in that case."""
     if req.profile not in hazard.PROFILES:
         raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
     pts = [(w.lat, w.lon) for w in req.waypoints]
+    if req.optimize_order:
+        # validated here, before router() (and therefore the database) is
+        # ever touched -- same "reject a bad request before it can reach
+        # the DB" contract every other endpoint in this file follows.
+        # route_multi_stop_optimized() re-checks this same bound itself
+        # (see its docstring / MAX_OPTIMIZE_STOPS), which is the actual
+        # boundary this is defense in depth for.
+        n_intermediate = len(req.waypoints) - 2
+        if n_intermediate > routing.MAX_OPTIMIZE_STOPS:
+            raise HTTPException(
+                400, f"can only optimize up to {routing.MAX_OPTIMIZE_STOPS} "
+                     f"intermediate stops ({n_intermediate} given)")
+        try:
+            opt = router().route_multi_stop_optimized(pts, req.profile, req.hour)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        gj = router().multi_stop_route_geojson(opt.plan)
+        gj["properties"]["order"] = opt.order
+        gj["properties"]["optimized"] = opt.optimized
+        gj["properties"]["orders_tried"] = opt.orders_tried
+        gj["properties"]["orders_complete"] = opt.orders_complete
+        return gj
     plan = router().route_multi_stop(pts, req.profile, req.hour)
     return router().multi_stop_route_geojson(plan)
 

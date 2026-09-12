@@ -91,36 +91,42 @@ being reachable at that moment.
 `tidestep/api.py` exposes, kept in sync as the backend grew across several
 passes (see `docs/STATUS.md`): `/api/config`, `/api/hours`, `/api/risk`,
 `/api/route` (including `time_aware=true`), `/api/route/advisory`,
-`/api/route/best_departure`, `POST /api/route/multi_stop`,
-`GET /api/route/to_safety`, and the saved-routes CRUD trio. UI wiring in
-`ContentView.swift`/`RiskMapView.swift`/`TideStepViewModel.swift` covers the
-original map/routing/saved-routes flow, the "check hazard at actual
-arrival time" time-aware toggle, and "Evacuate to safety" (a button that
-reuses the already-set start point, no destination needed, drawing a
-dashed orange line — or a marker for the already-safe case — to the
-nearest point that stays flood-safe for the rest of the forecast window).
-**Not yet built as a screen**: `/api/route/advisory`, `/api/route/best_departure`,
-and `POST /api/route/multi_stop` have complete, matched-field-for-field
-model/API-client support (`RouteAdvisoryResponse`, `BestDepartureResponse`,
-`MultiStopFeatureCollection`, `MultiStopRequest`) ready to call, but no
-SwiftUI screen calls them yet — the web frontend's equivalents (the
-24-cell hour strip with a "best time to leave" callout, and the
-click-to-add-stop multi-stop planner) are meaningfully more involved UI
-than the time-aware toggle or the safety button, and were left for a
-follow-up pass rather than rushed without a compiler to check the result
-against.
+`/api/route/best_departure`, `POST /api/route/multi_stop` (including
+`optimize_order=true`), `GET /api/route/to_safety`, and the saved-routes
+CRUD trio. UI wiring in
+`ContentView.swift`/`RiskMapView.swift`/`TideStepViewModel.swift` now
+covers every one of those except `/api/route/advisory`: the original
+map/routing/saved-routes flow, the "check hazard at actual arrival time"
+time-aware toggle, "Evacuate to safety" (a button that reuses the
+already-set start point, no destination needed, drawing a dashed orange
+line — or a marker for the already-safe case — to the nearest point that
+stays flood-safe for the rest of the forecast window), the "best time to
+leave" hour strip (`ContentView.bestDepartureStrip`, backed by
+`TideStepViewModel.loadBestDeparture()` — refreshed alongside every
+`findRoute()` call, same trigger as the web frontend's `renderAdvisory()`),
+and the multi-stop trip planner (`ContentView.multiStopPanel` +
+`RiskMapView`'s stop markers/leg polylines, backed by
+`TideStepViewModel.addStop()`/`clearStops()`/`planTrip()`), including the
+opt-in "find the best order to visit stops in" toggle
+(`route_multi_stop_optimized`).
+**`/api/route/advisory` (`RouteAdvisoryResponse`) has no screen and none is
+planned**: it was never actually a standalone feature of the web app either
+— `frontend/index.html`'s "advisory" hour strip calls
+`renderAdvisory()`, and that function has always been powered by
+`/api/route/best_departure`, not `/api/route/advisory` (confirmed by
+reading the frontend JS directly). `RouteAdvisoryResponse` and
+`APIClient.routeAdvisory()` are kept for API completeness/direct testing
+but true web-parity only ever required the two screens now built above.
 
 ## Known gaps / next steps
 
 - **Not compiled yet** (see above) — this is the top priority before
   relying on it for a demo. This applies doubly to the newest additions
-  (the time-aware toggle and "Evacuate to safety") — reviewed line by line
-  against `tidestep/api.py`'s and `tidestep/routing.py`'s actual JSON
-  shapes and against `frontend/index.html`'s equivalent behavior, brace-
-  and paren-balance-checked, but never built.
-- **`RouteAdvisoryResponse`, `BestDepartureResponse`, and
-  `MultiStopFeatureCollection` have no screen yet** — see "API coverage"
-  above. Building those three is the natural next iOS-specific task.
+  (the time-aware toggle, "Evacuate to safety", the best-departure strip,
+  and the multi-stop planner) — reviewed line by line against
+  `tidestep/api.py`'s and `tidestep/routing.py`'s actual JSON shapes and
+  against `frontend/index.html`'s equivalent behavior, brace- and
+  paren-balance-checked, but never built.
 - No offline caching beyond the in-memory per-hour risk cache
   (`TideStepViewModel.riskCache`) — closing the app loses it. Fine for a
   demo, worth a `URLCache`/on-disk cache for a real 2.0.

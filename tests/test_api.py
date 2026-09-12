@@ -209,3 +209,40 @@ def test_route_to_safety_rejects_hour_above_forecast_window(client):
 def test_route_to_safety_valid_request_reaches_the_router(client):
     with pytest.raises(AssertionError):
         client.get("/api/route/to_safety", params=dict(olat=40.80, olon=-73.71, profile="adult"))
+
+
+def test_multi_stop_optimize_order_rejects_unknown_profile_before_touching_the_database(client):
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70}],
+        "profile": "dog", "optimize_order": True})
+    assert r.status_code == 400
+    assert "profile" in r.json()["detail"]
+
+
+def test_multi_stop_optimize_order_rejects_too_many_intermediate_stops(client):
+    """MAX_OPTIMIZE_STOPS (6) intermediate stops is the brute-force cap;
+    this request has 7 (9 waypoints total) and must be rejected with a
+    clear 400, not silently truncated or left to hang."""
+    waypoints = [{"lat": 40.80 + i * 0.001, "lon": -73.71} for i in range(9)]
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": waypoints, "profile": "adult", "optimize_order": True})
+    assert r.status_code == 400
+    assert "intermediate stops" in r.json()["detail"]
+
+
+def test_multi_stop_optimize_order_valid_request_reaches_the_router(client):
+    with pytest.raises(AssertionError):
+        client.post("/api/route/multi_stop", json={
+            "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70},
+                         {"lat": 40.82, "lon": -73.69}],
+            "profile": "adult", "optimize_order": True})
+
+
+def test_multi_stop_without_optimize_order_is_unaffected(client):
+    """optimize_order defaults False -- a plain multi_stop request must
+    still take the original, unoptimized code path (and therefore still
+    hit the same no-DB guard the same way as before this feature existed)."""
+    with pytest.raises(AssertionError):
+        client.post("/api/route/multi_stop", json={
+            "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70}],
+            "profile": "adult"})

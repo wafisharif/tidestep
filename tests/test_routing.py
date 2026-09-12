@@ -530,3 +530,81 @@ def test_route_to_safety_queries_havens_from_departure_hour_onward(monkeypatch):
     R = routing.Router(G, engine=object())
     R.route_to_safety((0, 0), "adult", 5)
     assert spy.calls == [(list(range(5, config.MAX_HOUR + 1)), "adult")]
+
+
+def chain_graph():
+    """Four nodes in a straight line (1-2-3-4, 100 m per leg), used to
+    build a multi-stop trip where the GIVEN waypoint order forces
+    backtracking but a reordering of the intermediate stops does not --
+    the exact case route_multi_stop_optimized() exists to catch."""
+    G = nx.MultiDiGraph(crs="EPSG:4326")
+    pts = {1: (0, 0), 2: (0.001, 0), 3: (0.002, 0), 4: (0.003, 0)}
+    for n, (x, y) in pts.items():
+        G.add_node(n, x=x, y=y)
+
+    def add(u, v, L, hw="residential"):
+        G.add_edge(u, v, key=0, length=L, highway=hw)
+        G.add_edge(v, u, key=0, length=L, highway=hw)
+
+    add(1, 2, 100); add(2, 3, 100); add(3, 4, 100)
+    return G
+
+
+def test_route_multi_stop_optimized_finds_a_shorter_visiting_order(monkeypatch):
+    """Waypoints as given: origin (node 1), then the FAR intermediate stop
+    (node 3), then the NEAR one (node 2), then destination (node 4) --
+    forces backtracking: 1->3 (200m) -> 2 (100m, backward) -> 4 (200m) =
+    500m total. Visiting the near stop first instead (1->2->3->4) needs no
+    backtracking at all: 300m. The optimizer must find that reordering."""
+    G = chain_graph()
+    monkeypatch.setattr(routing, "db", FakeDB(set()))
+    R = routing.Router(G, engine=object())
+    waypoints = [(0, 0), (0, 0.002), (0, 0.001), (0, 0.003)]
+
+    naive = R.route_multi_stop(waypoints, "adult", 0)
+    assert naive.total_length_m == 500
+
+    opt = R.route_multi_stop_optimized(waypoints, "adult", 0)
+    assert opt.optimized is True
+    assert opt.order == [0, 2, 1, 3]           # visit the near stop (index 2) first
+    assert opt.plan.total_length_m == 300      # no backtracking
+    assert opt.orders_tried == 2               # 2! permutations of 2 intermediate stops
+    assert opt.orders_complete == 2            # both orders are fully safe here
+
+
+def test_route_multi_stop_optimized_no_reorder_needed_for_one_stop(monkeypatch):
+    G = chain_graph()
+    monkeypatch.setattr(routing, "db", FakeDB(set()))
+    R = routing.Router(G, engine=object())
+    waypoints = [(0, 0), (0, 0.001), (0, 0.003)]   # only one intermediate stop
+    opt = R.route_multi_stop_optimized(waypoints, "adult", 0)
+    assert opt.optimized is False
+    assert opt.order == [0, 1, 2]
+    assert opt.orders_tried == 1
+    assert opt.orders_complete == 1
+
+
+def test_route_multi_stop_optimized_rejects_too_many_stops():
+    G = chain_graph()
+    R = routing.Router(G, engine=object())
+    waypoints = [(0, 0)] * 9   # 7 intermediate stops, one over MAX_OPTIMIZE_STOPS
+    with pytest.raises(ValueError):
+        R.route_multi_stop_optimized(waypoints, "adult", 0)
+
+
+def test_route_multi_stop_optimized_falls_back_to_given_order_when_nothing_completes(monkeypatch):
+    """The only edge out of the origin (1-2) is unsafe at every hour, so
+    every possible visiting order is blocked on its very first leg --
+    there is no "best" order to find. optimize_order must not silently
+    return a blocked plan pretending it's the answer; it falls back to
+    the plan for the order the caller actually gave."""
+    G = chain_graph()
+    monkeypatch.setattr(routing, "db", FakeDB({(1, 2, 0), (2, 1, 0)}))
+    R = routing.Router(G, engine=object())
+    waypoints = [(0, 0), (0, 0.002), (0, 0.001), (0, 0.003)]
+    opt = R.route_multi_stop_optimized(waypoints, "adult", 0)
+    assert opt.optimized is False
+    assert opt.order == [0, 1, 2, 3]           # unchanged: the given order
+    assert opt.orders_complete == 0
+    assert opt.orders_tried == 2
+    assert opt.plan.blocked_leg_index == 0

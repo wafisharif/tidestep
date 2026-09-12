@@ -1,6 +1,169 @@
 # Status
 
-Updated: 2026-09-11
+Updated: 2026-09-12
+
+## Done (2026-09-12, tenth pass — iOS parity: the two remaining screens)
+
+As with the ninth pass, this pass re-read `docs/STATUS.md`,
+`ios/README.md`, and every touched Swift file fresh from disk before
+editing anything, since the concurrent teammate session shares this
+sandbox's filesystem and, apparently, the connected laptop folder too —
+no collision found this time, everything was exactly as the ninth pass's
+own entry above left it.
+
+Before writing any Swift, re-checked `ios/README.md`'s own claim that
+three endpoints (`/api/route/advisory`, `/api/route/best_departure`,
+`POST /api/route/multi_stop`) had "no screen yet." Reading
+`frontend/index.html` directly showed this was one endpoint too many:
+the web app's own "advisory" hour-strip UI (`renderAdvisory()`) has
+always called `/api/route/best_departure`, not `/api/route/advisory` —
+the latter has never been a standalone web feature, just a model/client
+pair kept for completeness. So true web-parity only ever needed **two**
+new screens, not three, and this pass built exactly those two:
+
+- **"Best time to leave" hour strip** (`ContentView.bestDepartureStrip`):
+  a row of 24 colored cells (green = a real route exists that hour, red =
+  none does) plus a callout naming the earliest safe hour, its
+  length/travel time, and how much longer it is than the direct route
+  when applicable — a line-for-line SwiftUI port of `renderAdvisory()`'s
+  actual DOM output, including the "no route exists at all, flooding
+  aside" and "no safe route at any hour" edge cases. Wired into
+  `TideStepViewModel.bestDeparture` (`@Published`), refreshed by a new
+  `loadBestDeparture()` called at the end of `findRoute()` for both the
+  success and failure paths, exactly mirroring the web frontend calling
+  `renderAdvisory()` unconditionally from `route()`.
+- **Multi-stop trip planner** (`ContentView.multiStopPanel` +
+  `RiskMapView`'s map layer): a toggle switches `RiskMapView`'s tap
+  gesture from "set origin/destination" to "append an ordered stop"
+  (`TideStepViewModel.addStop()`), draws each tapped stop as a numbered
+  marker, and — after "Plan trip" calls the new `planTrip()` — draws one
+  colored polyline (or marker, for a zero-length leg) per completed leg
+  via a new `HazardColor.legColors`/`forLeg(_:)` palette that matches
+  `frontend/index.html`'s `legColors` array exactly, cycled by leg index.
+  Includes the ninth pass's `optimize_order` opt-in as a checkbox
+  ("find the best order to visit stops in (up to 6 stops)"), and the
+  result text reproduces the web version's exact three cases: blocked at
+  a specific stop, completed with a plain order, or completed with a
+  reordered/confirmed-already-best order naming how many visiting orders
+  were checked — all read directly from `frontend/index.html`'s
+  `planTrip()` JS rather than re-derived, so the wording matches on both
+  platforms.
+- **Models/APIClient support added first** (same order as every previous
+  iOS pass — data layer before UI): `MultiStopTripProperties` gained the
+  four `optimize_order`-only fields (`order`, `optimized`, `ordersTried`,
+  `ordersComplete`, all optional so a plain `multi_stop` response — which
+  omits these keys entirely — still decodes correctly);
+  `MultiStopRequest` gained `optimizeOrder`; `APIClient.routeMultiStop()`
+  gained an `optimizeOrder: Bool = false` parameter (default preserves
+  every existing call site).
+- **Verification, same honest caveat as every iOS pass**: no
+  Swift/Xcode toolchain exists in either Claude sandbox, so this is
+  reviewed and cross-checked, not compiled. Every field name was matched
+  against the structs read from `Models.swift` before writing a single
+  line of UI code (`MultiStopLegFeature.properties.legIndex`,
+  `RouteOrPointGeometry`'s `.line`/`.point` cases, `HourRoute.safe`, etc.)
+  rather than guessed, and brace/paren balance was re-checked after every
+  edit: `Models.swift` 75/75 braces, 57/57 parens; `APIClient.swift`
+  30/30, 130/130; `TideStepViewModel.swift` 63/63, 83/83;
+  `RiskMapView.swift` 28/28, 88/88; `ContentView.swift` 125/125, 270/270.
+- **`ios/README.md`** rewritten to describe both new screens under "API
+  coverage," and to correct the "three endpoints, no screen" framing to
+  the real "one endpoint (`/api/route/advisory`) was never a standalone
+  feature to begin with" story, so a future reader doesn't go looking for
+  a third screen that was never actually missing.
+- Python test suite untouched by this pass (iOS-only changes) —
+  re-ran anyway as a sanity check: still 136/136.
+- Synced to the laptop (`C:\Users\wafis\Documents\tidestep-app\...`) via
+  the device bridge and byte-verified: `Models.swift`, `APIClient.swift`,
+  `TideStepViewModel.swift`, `RiskMapView.swift`, `ContentView.swift`,
+  `ios/README.md`, `docs/STATUS.md`.
+
+## Done (2026-09-12, ninth pass — stop-order optimization for multi-stop
+trips, the first item on the eighth pass's own "Next" list)
+
+Before starting any new code, this pass re-read the entire current state
+of `tidestep/routing.py`, `tidestep/api.py`, `frontend/index.html`, and
+every test file fresh from disk — not from memory of an earlier session —
+specifically because of the eighth pass's concurrent-edit warning above.
+Confirmed `route_multi_stop()`, `route_to_safety()`, `always_safe_nodes()`,
+and their frontend/tests/docs were already complete and correct (126/126
+passing before this pass touched anything), so this pass picked up the
+next undone item from the roadmap rather than re-deriving already-finished
+work.
+
+- **`Router.route_multi_stop_optimized()`** (`POST /api/route/multi_stop`
+  with `optimize_order: true`) closes the exact gap
+  `docs/LIMITATIONS.md` flagged: `route_multi_stop()` visits waypoints in
+  the order given, with no search for a better order. The new method
+  fixes the origin and final destination and brute-forces every
+  permutation of the INTERMEDIATE stops (capped at
+  `routing.MAX_OPTIMIZE_STOPS = 6` — 6! = 720 permutations is fast at this
+  bbox's scale; the endpoint rejects with a clear 400 past that rather
+  than silently taking a long time), scoring only visiting orders where
+  every leg actually completes (no `blocked_leg_index`) by total travel
+  time. If no order completes at all, the original given order's plan is
+  returned unchanged (`optimized: false`) rather than guessing which
+  partial failure is "best."
+- **Built entirely on `route_multi_stop()`** (one call per candidate
+  order) rather than a new pathfinding implementation, so its correctness
+  rests on that method's already-tested per-leg arrival-hour chaining —
+  this method only adds the search over orders, the same "reuse the
+  already-proven engine" pattern every routing feature since
+  `route_time_aware()` has followed.
+- **Test count: 126 -> 136** (+4 `tests/test_routing.py`: a constructed
+  case with a straight 4-node chain graph where the given order forces
+  backtracking (500 m) and the optimal reorder does not (300 m) — proving
+  this answers a genuinely different question than a fixed-order chain,
+  not just relabeling the same result; the "0 or 1 intermediate stop,
+  nothing to optimize" case; the `MAX_OPTIMIZE_STOPS` rejection; and the
+  "every order is blocked, fall back to the given order" case, where the
+  only edge out of the origin is unsafe so no visiting order can possibly
+  work. +4 `tests/test_api.py` request-validation paths (including
+  confirming the stop-count cap is rejected with a 400 *before* the
+  database is touched, and that a plain `multi_stop` request without
+  `optimize_order` is completely unaffected). +2
+  `tests/test_integration.py` against real loaded data: a 4-waypoint
+  adult trip confirming both permutations complete and the response is
+  self-consistent (a genuine permutation of all waypoint indices, origin
+  and destination never reordered), and the stop-count-cap rejection
+  against the real app. All 136 pass in `pytest -q`, including the 16
+  DB-dependent integration tests run for real against a live local
+  Postgres this pass.
+- **Live end-to-end verification proved a REAL improvement, not just a
+  well-formed response**: booted a real `uvicorn` process against
+  regenerated dev_seed data and queried actual segment coordinates from
+  Postgres to build waypoints that land on genuinely distinct street
+  nodes (the first attempt used coordinates outside the synthetic
+  scenario's actual (tiny) street extent, which — honestly noted, not
+  hidden — made every waypoint snap to the same one or two nodes and
+  produced no interesting reordering; querying real segment endpoints
+  from the database fixed this). With four waypoints arranged so the
+  given order forces a diagonal criss-cross across the grid, the plain
+  endpoint returned 1203.3 m; the same four waypoints with
+  `optimize_order=true` correctly found the perimeter order instead,
+  863.3 m — a real 28% reduction, from reordering alone. Every
+  pre-existing endpoint (`/api/route`, `/api/route/to_safety`, and a
+  plain `multi_stop` request) was re-curled and reconfirmed unchanged —
+  zero regression, since `routing.py` and `api.py` were touched again
+  this pass.
+- **Frontend**: the "Multi-stop trip" panel gets a new "find the best
+  order to visit stops in" checkbox. When checked, `planTrip()` sends
+  `optimize_order: true` and, on success, relabels the numbered stop pins
+  on the map with their ACTUAL visiting order (not just the click order),
+  so a reordering is visible at a glance, not only described in the
+  result text — which itself now says whether reordering happened and
+  how many visiting orders were checked. A non-200 response (the
+  stop-count cap) is now shown as an explicit message instead of failing
+  silently. Verified via `node --check` on the extracted inline script
+  and, live, by curling the running server and confirming the new
+  `optimizeOrder` checkbox and `optimize_order` field are actually
+  served.
+- Docs updated: `docs/LIMITATIONS.md`'s multi-stop-order caveat rewritten
+  to describe the new opt-in optimization (and its honest remaining
+  limits: brute force, not a real TSP heuristic past the cap; optimizes
+  total time only, no per-stop time windows); `docs/NOVELTY.md` gets an
+  11th numbered differentiator, citing the live 1203.3 m -> 863.3 m
+  result above as concrete proof rather than a claimed capability.
 
 ## Done (2026-09-11, eighth pass — concurrent-edit collision caught and
 resolved, iOS app brought back to parity with 5 backend passes it had
@@ -703,23 +866,26 @@ there today; nothing left is blocked on tooling)
    `.git` working tree is shared, so whoever runs `git add`/`commit`
    first should let the other know, to avoid the same kind of collision
    happening again at the git layer instead of the filesystem layer.
-1a. Once pushed, feature-work candidates worth considering next (none
-   started): (i) **stop-order optimization for multi-stop trips** — right
-   now `route_multi_stop()` routes waypoints in the order given; a small
-   number of stops (≤6-7) is cheap enough to brute-force the best visiting
-   order, flagged honestly as a gap in `docs/LIMITATIONS.md`; (ii)
+1a. Once pushed, feature-work candidates worth considering next: (i)
+   ~~stop-order optimization for multi-stop trips~~ **done this pass** —
+   see `route_multi_stop_optimized()` above; (ii)
    **real shelter locations for `route_to_safety()`** — it currently
    treats any dry street segment as a valid haven; loading an actual POI
    layer (schools, firehouses) would make its answer meaningfully more
-   useful, also flagged in `docs/LIMITATIONS.md`; (iii) push
+   useful, also flagged in `docs/LIMITATIONS.md`. **Confirmed this pass:
+   not buildable from either Claude sandbox** — `curl` to both
+   `overpass-api.de` and `nominatim.openstreetmap.org` gets a proxy
+   `connect_rejected` (same class of restriction `CLAUDE.md` already
+   documents for NOAA/USGS), so fetching an OSM POI layer for this needs
+   the laptop, same as every other real-data fetch in this project; (iii)
+   push
    `route_best_departure()`'s per-hour search from a full 24-hour sweep
    down to only the hours between two changes in safety state, to cut its
    DB-query count if it ever needs to run against a much larger street
-   graph than this bbox's; (iv) **iOS screens for `/api/route/advisory`,
-   `/api/route/best_departure`, and `POST /api/route/multi_stop`** — the
-   eighth pass brought the model/API-client layer to full parity with the
-   backend, but those three endpoints have no SwiftUI screen yet (see
-   `ios/README.md`'s "API coverage" section).
+   graph than this bbox's; (iv) ~~iOS screens for `/api/route/best_departure`
+   and `POST /api/route/multi_stop`~~ **done this pass (tenth)** — see
+   `ContentView.bestDepartureStrip`/`multiStopPanel` above;
+   `/api/route/advisory` was confirmed to need no screen (see `ios/README.md`).
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
@@ -760,42 +926,45 @@ see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
 `docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
 committed and pushed (`8d779c6`, confirmed via `git log origin/main`).
 Everything else described in this file is still local-only. Files touched
-**this pass** (on top of everything already listed as uncommitted from
-earlier passes — the seventh pass's `tidestep/routing.py`/`db.py`/`api.py`/
-`frontend/index.html` changes are already captured in that pass's own
-bullet below and were not modified again by this pass beyond the
-duplicate-code cleanup described above, which nets to no functional
-change):
-- Modified: `tidestep/routing.py` (cleanup only — removed this session's
-  duplicate/inferior classes and methods that collided with the seventh
-  pass's; net content after cleanup is identical to what the seventh pass
-  already produced), `ios/TideStep/Models.swift`, `ios/TideStep/APIClient.swift`,
-  `ios/TideStep/TideStepViewModel.swift`, `ios/TideStep/ContentView.swift`,
-  `ios/TideStep/RiskMapView.swift`, `ios/README.md`, `docs/STATUS.md`
-  (this section).
-- From the seventh pass (already uncommitted, unchanged by this pass):
-  `tidestep/db.py` (new `always_safe_nodes()`), `tidestep/api.py` (new
-  `POST /api/route/multi_stop` and `GET /api/route/to_safety` endpoints),
-  `frontend/index.html` (new "Multi-stop trip" and "Evacuate to safety"
-  panel sections), `tests/test_routing.py` (+10), `tests/test_api.py`
-  (+8), `tests/test_integration.py` (+3), `docs/LIMITATIONS.md` (+2 new
-  caveats), `docs/NOVELTY.md` (+2 entries).
-- Everything else previously listed here (from the six earlier passes:
-  `README.md`, `tidestep/config.py`, `tidestep/segments.py`,
+**this pass (tenth)**:
+- Modified: `ios/TideStep/Models.swift` (`optimize_order`-only fields on
+  `MultiStopTripProperties`, `optimizeOrder` on `MultiStopRequest`),
+  `ios/TideStep/APIClient.swift` (`routeMultiStop()` gains
+  `optimizeOrder` param), `ios/TideStep/TideStepViewModel.swift`
+  (`bestDeparture` published state + `loadBestDeparture()`; multi-stop
+  published state + `addStop()`/`clearStops()`/`planTrip()`),
+  `ios/TideStep/RiskMapView.swift` (`HazardColor.legColors`/`forLeg()`,
+  tap-gesture branch on `multiStopMode`, stop-marker and per-leg-polyline
+  drawing), `ios/TideStep/ContentView.swift` (`bestDepartureStrip`,
+  `multiStopPanel`, `tripSummary()`), `ios/README.md` ("API coverage" /
+  "Known gaps" rewritten), `docs/STATUS.md` (this section).
+- From the ninth pass (already uncommitted, unchanged by this pass):
+  `tidestep/routing.py` (`route_multi_stop_optimized()`,
+  `OptimizedTripPlan`, `MAX_OPTIMIZE_STOPS`), `tidestep/api.py`
+  (`optimize_order` field + branch on `POST /api/route/multi_stop`),
+  `frontend/index.html` ("find the best order to visit stops in"
+  checkbox, visit-order relabeling, non-200 error display),
+  `tests/test_routing.py` (+4), `tests/test_api.py` (+4),
+  `tests/test_integration.py` (+2), `docs/LIMITATIONS.md`,
+  `docs/NOVELTY.md` (+1 entry).
+- From the seventh pass and earlier (already uncommitted, unchanged by
+  this pass): `tidestep/db.py` (`always_safe_nodes()`), the rest of
+  `tidestep/routing.py`/`api.py`/`frontend/index.html`'s prior feature
+  work, `README.md`, `tidestep/config.py`, `tidestep/segments.py`,
   `scripts/build_hazard.py`, `scripts/hourly_update.py`,
   `requirements-dev.txt`, `scripts/dev_seed.py`,
   `scripts/validate_stage9.py`, `tidestep/validate.py`, and every earlier
-  new test file) is still uncommitted too — nothing described anywhere
-  in this file has reached `origin/main` since `8d779c6`.
+  test file — nothing described anywhere in this file has reached
+  `origin/main` since `8d779c6`.
 
 Suggested split, each buildable in one `git add` + `git commit`:
 1. `docs/STATUS.md docs/NOVELTY.md docs/LIMITATIONS.md README.md` — docs.
 2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests (every
-   feature and fix across all seven passes: predictive alerting, dev_seed
+   feature and fix across all nine passes: predictive alerting, dev_seed
    fixture, validate.py, api/db hardening, the near_inlet caching fix, the
    hourly_update.py sync_db fix, time-aware routing + trip advisory,
-   route_best_departure(), and this pass's multi-stop trips + evacuation
-   routing).
+   route_best_departure(), multi-stop trips + evacuation routing, and
+   this pass's route_multi_stop_optimized()).
 3. `frontend/index.html` — the UI for every routing feature above (small
    enough to call out on its own so a reviewer can see exactly what
    changed in the demo-facing surface).
@@ -804,9 +973,14 @@ Suggested split, each buildable in one `git add` + `git commit`:
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "routing: multi-stop trip chaining + destination-free evacuation routing (105->126 tests)"
+git commit -m "routing: brute-force stop-order optimization + iOS best-departure/multi-stop screens"
 git push
 ```
+**Coordinate with your teammate before running this** — this repo's
+`.git` working tree is shared between both of your sessions (see the
+eighth pass's concurrent-edit note above), so confirm neither of you has
+uncommitted work the other doesn't know about before either of you runs
+`git add`/`commit`.
 
 ## Notes
 - `ofs_water_level` returns 6-minute data; we take the hourly max.

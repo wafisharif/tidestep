@@ -92,6 +92,8 @@ struct ContentView: View {
                 routeSummary(route)
             }
 
+            bestDepartureStrip
+
             HStack {
                 Button("Clear") { vm.clearRoute() }
                     .font(.caption)
@@ -102,6 +104,8 @@ struct ContentView: View {
             }
 
             evacuateToSafety
+
+            multiStopPanel
 
             legend
         }
@@ -148,6 +152,53 @@ struct ContentView: View {
         .background(Color.gray.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
     }
 
+    /// "Best time to leave" hour strip (Router.route_best_departure) --
+    /// mirrors frontend/index.html's renderAdvisory(): a row of colored
+    /// cells (one per forecast hour, green if a real route exists that
+    /// hour, red if not) plus a callout naming the earliest hour with a
+    /// route. Refreshed whenever findRoute() runs (see
+    /// TideStepViewModel.loadBestDeparture()), so it always reflects the
+    /// current origin/destination.
+    private var bestDepartureStrip: some View {
+        Group {
+            if let a = vm.bestDeparture {
+                VStack(alignment: .leading, spacing: 3) {
+                    if a.baselineLengthM == nil {
+                        Text("No route exists for this profile between these points, flooding aside.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    } else {
+                        HStack(spacing: 1) {
+                            ForEach(a.hours) { h in
+                                RoundedRectangle(cornerRadius: 1)
+                                    .fill(h.safe ? HazardColor.safe : HazardColor.unsafe)
+                                    .frame(height: 10)
+                            }
+                        }
+                        if let rh = a.recommendedHour {
+                            let km = (a.recommendedLengthM ?? 0) / 1000
+                            let longer: String = {
+                                guard let rec = a.recommendedLengthM, let base = a.baselineLengthM, base > 0,
+                                      rec > base else { return "" }
+                                let pct = Int((rec / base - 1) * 100)
+                                return " (\(pct)% longer than the direct route)"
+                            }()
+                            Text(String(format: "Best time to leave: hour %d — %.2f km, ~%.1f min%@",
+                                       rh, km, a.recommendedTravelTimeMin ?? 0, longer))
+                                .font(.caption2)
+                        } else {
+                            Text("No safe route exists for this trip at any hour in the forecast.")
+                                .font(.caption2)
+                        }
+                        let nUnsafe = a.hours.filter { !$0.safe }.count
+                        Text(nUnsafe > 0 ? "Safe to leave now → +24h · unsafe \(nUnsafe) of \(a.hours.count) hours"
+                                          : "Safe to leave now → +24h · safe the whole window")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
     /// "Evacuate to safety" (Router.route_to_safety, GET
     /// /api/route/to_safety) — reuses whatever start point is already set
     /// above; needs no destination, which is the point of the feature.
@@ -183,6 +234,86 @@ struct ContentView: View {
                 let km = (p.lengthM ?? 0) / 1000
                 Text(String(format: "Nearest safe haven: %.2f km, ~%.1f min away.",
                            km, p.travelTimeMin ?? 0))
+                    .font(.caption2)
+            }
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    /// "Multi-stop trip" panel (Router.route_multi_stop /
+    /// route_multi_stop_optimized, POST /api/route/multi_stop) -- mirrors
+    /// frontend/index.html's multi-stop panel + planTrip(). While
+    /// vm.multiStopMode is on, RiskMapView's tap gesture appends to
+    /// vm.stops instead of setting origin/destination.
+    private var multiStopPanel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $vm.multiStopMode) {
+                Text("Multi-stop trip").font(.caption)
+            }
+            .toggleStyle(.switch)
+            .onChange(of: vm.multiStopMode) { _, on in if !on { vm.clearStops() } }
+
+            if vm.multiStopMode {
+                Text(stopsLabel).font(.caption2).foregroundStyle(.secondary)
+
+                Toggle(isOn: $vm.optimizeStopOrder) {
+                    Text("find the best order to visit stops in (up to 6 stops)")
+                        .font(.caption2)
+                }
+                .toggleStyle(.switch)
+
+                HStack {
+                    Button {
+                        Task { await vm.planTrip() }
+                    } label: {
+                        if vm.isPlanningTrip {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Plan trip")
+                        }
+                    }
+                    .font(.caption)
+                    .disabled(vm.stops.count < 2 || vm.isPlanningTrip)
+
+                    Button("Clear stops") { vm.clearStops() }
+                        .font(.caption)
+                }
+
+                if let err = vm.tripErrorMessage {
+                    Text("Couldn't plan this trip: \(err)").font(.caption2).foregroundStyle(.red)
+                } else if let trip = vm.tripPlan {
+                    tripSummary(trip)
+                }
+            }
+        }
+    }
+
+    private var stopsLabel: String {
+        switch vm.stops.count {
+        case 0: return "Tap the map to add stops, in order."
+        case 1: return "1 stop set — add at least one more"
+        default: return "\(vm.stops.count) stops set — ready to plan"
+        }
+    }
+
+    private func tripSummary(_ trip: MultiStopFeatureCollection) -> some View {
+        let p = trip.properties
+        return Group {
+            if let blocked = p.blockedLegIndex {
+                Text("Blocked at stop \(blocked + 2) of \(vm.stops.count) — "
+                     + "no safe route for that leg at the hour you'd actually reach it "
+                     + "(\(trip.features.count) of \(vm.stops.count - 1) leg(s) shown are safely reachable).")
+                    .font(.caption2)
+            } else {
+                let km = (p.totalLengthM ?? 0) / 1000
+                let orderNote: String = {
+                    guard vm.optimizeStopOrder, let tried = p.ordersTried else { return "" }
+                    return p.optimized == true
+                        ? " — reordered stops for a shorter trip (checked \(tried) visiting order(s))."
+                        : " — your order was already best (checked \(tried) visiting order(s))."
+                }()
+                Text(String(format: "%.2f km total · ~%.1f min · arrives around hour %d%@",
+                           km, p.totalTravelTimeMin ?? 0, p.arrivalHour ?? 0, orderNote))
                     .font(.caption2)
             }
         }

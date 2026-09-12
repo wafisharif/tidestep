@@ -247,6 +247,46 @@ def test_multi_stop_endpoint_rejects_bad_profile_against_real_app(seeded_app):
     assert r.status_code == 400
 
 
+def test_multi_stop_optimize_order_endpoint_works_against_real_data(seeded_app):
+    """Drives optimize_order=true through the real HTTP -> FastAPI ->
+    Router.route_multi_stop_optimized -> real Postgres path with a
+    4-waypoint (2-intermediate-stop) adult trip -- never floods in this
+    scenario, so every one of the 2! visiting orders should succeed.
+    Doesn't assert which specific order wins (that depends on the
+    synthetic topology's exact geometry) -- just the self-consistency
+    every response must have: a valid permutation as ``order``, and a
+    total_length_m that matches whichever order was actually returned."""
+    client, *_ = seeded_app
+    body = {
+        "waypoints": [
+            {"lat": 40.9, "lon": -73.6998},
+            {"lat": 40.9, "lon": -73.6923},
+            {"lat": 40.9, "lon": -73.6873},
+            {"lat": 40.9, "lon": -73.6748},
+        ],
+        "profile": "adult", "hour": 0, "optimize_order": True,
+    }
+    r = client.post("/api/route/multi_stop", json=body)
+    assert r.status_code == 200
+    out = r.json()
+    props = out["properties"]
+    assert props["blocked_leg_index"] is None
+    assert props["orders_tried"] == 2          # 2! permutations of 2 intermediate stops
+    assert props["orders_complete"] == 2       # adult never floods here -- both should work
+    assert sorted(props["order"]) == [0, 1, 2, 3]     # a genuine permutation of all 4 indices
+    assert props["order"][0] == 0 and props["order"][-1] == 3   # endpoints never reordered
+    assert len(out["features"]) == 3
+    assert props["total_length_m"] is not None
+
+
+def test_multi_stop_optimize_order_endpoint_rejects_too_many_stops_against_real_app(seeded_app):
+    client, *_ = seeded_app
+    waypoints = [{"lat": 40.9 + i * 0.001, "lon": -73.6998} for i in range(9)]
+    r = client.post("/api/route/multi_stop", json={
+        "waypoints": waypoints, "profile": "adult", "optimize_order": True})
+    assert r.status_code == 400
+
+
 def test_route_to_safety_endpoint_works_against_real_data(seeded_app):
     """Drives GET /api/route/to_safety through the real app against real
     loaded data. Doesn't assert a specific destination (that depends on

@@ -68,6 +68,8 @@
     <label class="checkrow"><input type="checkbox" id="multiStopMode">
       plan a trip with stops (click map to add each stop)</label>
     <div class="hint" id="stopsLabel">no stops yet</div>
+    <label class="checkrow"><input type="checkbox" id="optimizeOrder">
+      find the best order to visit stops in (up to 6 stops)</label>
     <button id="planTrip" class="secondary">Plan trip</button>
     <button id="clearStops" class="secondary">Clear stops</button>
     <div id="tripResult"></div>
@@ -237,11 +239,20 @@ function addStop(latlng) {
 async function planTrip() {
   if (stops.length < 2) return;
   legLayers.forEach(l => map.removeLayer(l)); legLayers = [];
+  const optimize = $('optimizeOrder').checked;
   const body = { waypoints: stops.map(s => ({ lat: s.lat, lon: s.lng })),
-                profile: $('profile').value, hour };
+                profile: $('profile').value, hour, optimize_order: optimize };
   const r = await fetch('/api/route/multi_stop', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const fc = await r.json();
+  const el = $('tripResult'); el.style.display = 'block';
+  if (r.status !== 200) {
+    // e.g. optimize_order requested with more stops than the brute-force
+    // cap (see routing.MAX_OPTIMIZE_STOPS) -- report it instead of
+    // silently drawing nothing.
+    el.innerHTML = `<b>Couldn't plan this trip:</b> ${fc.detail || r.statusText}`;
+    return;
+  }
   fc.features.forEach((f, i) => {
     const c = legColors[i % legColors.length];
     legLayers.push(L.geoJSON(f, {
@@ -249,15 +260,28 @@ async function planTrip() {
       pointToLayer: (feat, latlng) => L.circleMarker(latlng, { radius: 6, color: c }),
     }).addTo(map));
   });
-  const p = fc.properties, el = $('tripResult'); el.style.display = 'block';
+  const p = fc.properties;
   const km = m => (m / 1000).toFixed(2) + ' km';
+  // when optimize_order was used, re-label the stop markers with their
+  // ACTUAL visiting order (1-based, matching the numbered map pins) so
+  // the reordering is visible, not just described in text
+  if (optimize && p.order) {
+    p.order.forEach((origIdx, visitPos) => {
+      stopMarkers[origIdx].setTooltipContent(String(visitPos + 1));
+    });
+  }
   if (p.blocked_leg_index != null) {
     el.innerHTML = `<b>Blocked at stop ${p.blocked_leg_index + 2}</b> of ${stops.length} — ` +
       `no safe route for that leg at the hour you'd actually reach it ` +
       `(${fc.features.length} of ${stops.length - 1} leg(s) shown are safely reachable).`;
   } else {
+    const orderNote = optimize
+      ? (p.optimized
+          ? ` — reordered stops for a shorter trip (checked ${p.orders_tried} visiting order(s)).`
+          : ` — your order was already best (checked ${p.orders_tried} visiting order(s)).`)
+      : '';
     el.innerHTML = `<b>${km(p.total_length_m)}</b> total · ~${p.total_travel_time_min} min · ` +
-      `arrives around hour ${p.arrival_hour}.`;
+      `arrives around hour ${p.arrival_hour}${orderNote}`;
   }
 }
 

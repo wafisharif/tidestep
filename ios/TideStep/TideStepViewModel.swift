@@ -39,6 +39,15 @@ final class TideStepViewModel: ObservableObject {
     /// the departure-hour-only default.
     @Published var timeAware: Bool = false
 
+    // "Best time to leave" hour strip (Router.route_best_departure) --
+    // mirrors frontend/index.html's renderAdvisory(), which (despite the
+    // name) is powered by /api/route/best_departure, not
+    // /api/route/advisory: it recomputes the ACTUAL best route for every
+    // hour rather than just checking one fixed path, so it can find a
+    // safe detour at an hour a plain advisory check would call unsafe.
+    // Refreshed alongside findRoute(), same trigger as the web version.
+    @Published var bestDeparture: BestDepartureResponse?
+
     // "Evacuate to safety" (Router.route_to_safety) — a destination-free
     // routing mode: given only vm.origin, find the nearest point that
     // stays flood-safe for the rest of the forecast window. Kept as its
@@ -48,6 +57,18 @@ final class TideStepViewModel: ObservableObject {
     @Published var safeHaven: SafeHavenFeature?
     @Published var safetyErrorMessage: String?
     @Published var isFindingSafety = false
+
+    // Multi-stop trip planning (Router.route_multi_stop /
+    // route_multi_stop_optimized) -- mirrors frontend/index.html's
+    // "Multi-stop trip" panel: when multiStopMode is on, map taps append
+    // an ordered stop instead of setting origin/destination (see
+    // RiskMapView's tap gesture, which checks this flag).
+    @Published var multiStopMode = false
+    @Published var stops: [CLLocationCoordinate2D] = []
+    @Published var optimizeStopOrder = false
+    @Published var tripPlan: MultiStopFeatureCollection?
+    @Published var tripErrorMessage: String?
+    @Published var isPlanningTrip = false
 
     // Saved routes
     @Published var savedRoutes: [SavedRoute] = []
@@ -151,6 +172,7 @@ final class TideStepViewModel: ObservableObject {
         destination = nil
         currentRoute = nil
         routeErrorMessage = nil
+        bestDeparture = nil
         clearSafety()   // safeHaven is always relative to `origin`, which just cleared
     }
 
@@ -165,6 +187,22 @@ final class TideStepViewModel: ObservableObject {
         } catch {
             currentRoute = nil
             routeErrorMessage = "Route request failed: \(error.localizedDescription)"
+        }
+        await loadBestDeparture()
+    }
+
+    /// Hour-by-hour ACTUAL best route for the current origin/destination,
+    /// across the whole forecast window (Router.route_best_departure) --
+    /// called alongside findRoute() so the "best time to leave" strip
+    /// always reflects the current trip, same as the web frontend calling
+    /// renderAdvisory() from route().
+    func loadBestDeparture() async {
+        guard let o = origin, let d = destination else { bestDeparture = nil; return }
+        do {
+            bestDeparture = try await api.routeBestDeparture(
+                from: (o.latitude, o.longitude), to: (d.latitude, d.longitude), profile: profile)
+        } catch {
+            bestDeparture = nil
         }
     }
 
@@ -206,6 +244,41 @@ final class TideStepViewModel: ObservableObject {
     func clearSafety() {
         safeHaven = nil
         safetyErrorMessage = nil
+    }
+
+    // MARK: - Multi-stop trip planning
+
+    /// Appends an ordered stop -- called from RiskMapView's tap gesture
+    /// when multiStopMode is on, mirroring the web frontend's addStop().
+    func addStop(_ coordinate: CLLocationCoordinate2D) {
+        stops.append(coordinate)
+        tripPlan = nil          // stale relative to the new stop list
+        tripErrorMessage = nil
+    }
+
+    func clearStops() {
+        stops = []
+        tripPlan = nil
+        tripErrorMessage = nil
+    }
+
+    /// Routes through every waypoint in `stops`, in order (or in the best
+    /// order, if optimizeStopOrder is set) -- Router.route_multi_stop /
+    /// route_multi_stop_optimized via POST /api/route/multi_stop.
+    func planTrip() async {
+        guard stops.count >= 2 else { return }
+        isPlanningTrip = true
+        defer { isPlanningTrip = false }
+        do {
+            let plan = try await api.routeMultiStop(
+                waypoints: stops.map { ($0.latitude, $0.longitude) },
+                profile: profile, hour: hourIndex, optimizeOrder: optimizeStopOrder)
+            tripPlan = plan
+            tripErrorMessage = nil
+        } catch {
+            tripPlan = nil
+            tripErrorMessage = "Couldn't plan this trip: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Saved routes
