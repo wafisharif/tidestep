@@ -40,6 +40,10 @@ enum HazardColor {
     ]
 
     static func forLeg(_ index: Int) -> Color { legColors[index % legColors.count] }
+
+    // Network resilience chokepoint layer, matching frontend/index.html's
+    // renderChokepoints() dashed-purple styling exactly.
+    static let chokepoint = Color(red: 0x4a / 255, green: 0x14 / 255, blue: 0x8c / 255)
 }
 
 struct RiskMapView: View {
@@ -102,6 +106,19 @@ struct RiskMapView: View {
                         case .point(let coord):
                             Marker("Leg \(leg.properties.legIndex + 1)", coordinate: coord)
                                 .tint(HazardColor.forLeg(leg.properties.legIndex))
+                        }
+                    }
+                }
+                // Network resilience: each chokepoint's geometry is a
+                // MultiLineString (possibly several disjoint hazard-model
+                // sub-segments -- see Models.swift's MultiLineStringGeometry
+                // doc), so every line piece gets its own MapPolyline.
+                if vm.showChokepoints, let cp = vm.chokepoints {
+                    ForEach(cp.features) { feature in
+                        ForEach(Array(feature.geometry.lines.enumerated()), id: \.offset) { _, coords in
+                            MapPolyline(coordinates: coords)
+                                .stroke(HazardColor.chokepoint,
+                                       style: StrokeStyle(lineWidth: 6, dash: [2, 8], lineCap: .round))
                         }
                     }
                 }

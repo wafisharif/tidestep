@@ -124,6 +124,19 @@ notice. Each one is also called out in the module it applies to.
   `route_best_departure()`), which is fine at this bbox's scale but would
   not scale city-wide without moving to something like OSRM with hourly
   traffic-speed-file swaps.
+- **`GET /api/network/chokepoints`'s "single point of failure" is purely
+  topological** (`tidestep/resilience.py`) — it only knows about the
+  streets present in the OSM graph this app loaded. It has no concept of
+  a private driveway, an informal cut-through, or a path that exists on
+  the ground but isn't mapped, any of which could quietly provide the
+  "other way around" the algorithm says doesn't exist; conversely it
+  cannot know if a mapped alternate path is closed, gated, or otherwise
+  unusable in practice. It also treats every graph node as equally
+  "isolated" — `nodes_isolated` counts intersections cut off, not
+  population or households, so it is a proxy for impact, not a census.
+  And, like `route_to_safety()` above, it is still-water-ponding-only: a
+  chokepoint's `hours_unsafe` reflects the currently-loaded 24h NYOFS
+  forecast, not what a bigger storm surge would do to the same street.
 
 ## Alerts
 

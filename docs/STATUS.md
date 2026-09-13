@@ -2,6 +2,107 @@
 
 Updated: 2026-09-12
 
+## Done (2026-09-12, eleventh pass — network-wide resilience analysis: a
+genuinely new KIND of question, not another routing mode)
+
+As with the tenth pass, re-read `git status`/file mtimes fresh before
+starting (no concurrent changes since the tenth pass landed) and re-ran
+the full suite first to confirm the starting point (136 passing).
+
+Every feature through the tenth pass answers some version of "can THIS
+traveler get through" for a specific trip. This pass asked a different
+question entirely, the kind a Congressional office actually cares about
+for infrastructure investment: **which streets, if they flood, cut part
+of the neighborhood off completely** — not a longer detour, no other path
+at all — **and how much of the current forecast do they actually flood.**
+
+- **`tidestep/resilience.py`, new module.** `find_chokepoints(G, engine,
+  profile)` finds every graph "bridge" edge (removing it disconnects the
+  network) in the profile-appropriate street network, using
+  `routing.edge_allowed` — the same rule the router itself uses for "can
+  this profile use this street" — so the two questions never quietly
+  drift apart. `_collapse_to_simple_graph` handles the two ways a naive
+  multigraph bridge check gets this wrong: it merges a single physical
+  two-way street's forward/backward directed edge pair (same `key`) into
+  ONE undirected connection (not two paths), while keeping a genuinely
+  separate parallel way between the same two nodes (different `key` —
+  e.g. a divided highway's second carriageway) as real redundancy. Each
+  confirmed chokepoint gets `nodes_isolated` (the smaller side of the
+  network if it's lost) via `nx.node_connected_component` on the graph
+  with that edge removed, then a single grouped SQL query per chokepoint
+  cross-references the hazard table for `hours_unsafe` (of the loaded
+  forecast) and `max_depth_cm`. `priority_score = nodes_isolated *
+  hours_unsafe` ranks "structurally fragile AND actually flooding" above
+  either alone — a chokepoint that never floods this forecast still shows
+  up (worth knowing for planning) but sorts to the bottom.
+- **`GET /api/network/chokepoints?profile=`** (`chokepoints_geojson()`) —
+  a GeoJSON FeatureCollection, one Feature per chokepoint (a
+  MultiLineString of its constituent hazard-model segments — a graph edge
+  can be split into several small pieces, see `tidestep/segments.py`),
+  sorted by `priority_score` descending. Validates `profile` the same way
+  every other endpoint in `api.py` does, before touching the database.
+- **Test count: 136 -> 145.** +6 `tests/test_resilience.py`, pure
+  topology, no database: a "dumbbell" graph (two triangles joined by one
+  street) proving the single real bridge is found with the correct
+  isolation size; a same-key forward/backward pair correctly collapsing
+  to ONE edge (the exact case a naive multigraph check gets wrong); a
+  genuinely parallel different-key way correctly NOT being flagged; a
+  vehicle profile correctly ignoring a footway-only connection that would
+  make the same edge non-critical for pedestrians; a fully-connected ring
+  having zero chokepoints; and the bad-profile rejection. +3
+  `tests/test_integration.py` against the real dev_seed grid: **a real,
+  previously-unnoticed structural fact about the demo scenario itself** —
+  dev_seed's synthetic street grid is a full 2-edge-connected mesh for
+  pedestrians (zero chokepoints, confirmed), but its two footway-only
+  links mean vehicles have a genuine two-segment dead-end spur at the
+  western end of Shore Rd, producing exactly two real chokepoints: losing
+  the near segment strands 1 node, losing the far one strands both — and
+  the near one floods 23 of 24 hours for `vehicle_small` while the far
+  one stays completely dry, so the ranking must (and does) put the
+  flooding one first. This was **discovered by running the code against
+  real loaded data, not designed in advance** — the first version of this
+  test assumed one chokepoint and failed with `2 == 1` until the actual
+  topology was inspected and the test was corrected to match reality
+  (documented here rather than quietly adjusted).
+- **Live end-to-end verification**: booted a real `uvicorn` process
+  against regenerated dev_seed data, curled `/api/network/chokepoints`
+  for both `adult` (0 chokepoints, matching the mesh finding) and
+  `vehicle_small` (2 chokepoints, matching the test exactly down to the
+  isolation counts, hours-unsafe counts, and geometry), and confirmed a
+  bad profile still returns 400. Every pre-existing endpoint (`/api/hours`,
+  `/api/risk`) re-curled and reconfirmed unchanged.
+- **Frontend**: new "Network resilience" panel section — a checkbox
+  toggles a distinct thick-dashed-purple map layer for the current
+  profile's chokepoints (color chosen to be unambiguous against the
+  existing safe/passable/unsafe/route/safety colors already in use,
+  called out in the legend), plus a ranked text summary of the top 5 by
+  priority score. Re-fetches automatically on profile change, same
+  pattern as the risk layer restyle. Verified via `node --check` on the
+  extracted inline script and, live, by curling the running server and
+  grepping the served HTML for the new element ids.
+- **Docs**: `docs/NOVELTY.md` gets a 12th numbered differentiator
+  (framed explicitly around why this is a different KIND of question,
+  not another routing mode, and citing the live dev_seed result as
+  concrete proof); `docs/LIMITATIONS.md` gets a new honest caveat under
+  "Routing" (purely topological — unmapped paths and gated/closed mapped
+  paths are both invisible to it; `nodes_isolated` counts intersections,
+  not population; still-water-ponding-only like the rest of the app).
+- **iOS, extended in the same pass** (reconsidered after writing the note
+  above — it fit better than expected): `Models.swift` gained
+  `MultiLineStringGeometry` (a chokepoint's geometry can be several
+  disjoint hazard-model sub-segments, so it needed its own decoder rather
+  than reusing `LineStringGeometry`/`RouteOrPointGeometry`),
+  `ChokepointFeature`/`ChokepointProperties`/`ChokepointFeatureCollection`;
+  `APIClient.chokepoints(profile:)`; `TideStepViewModel` gained
+  `showChokepoints`/`chokepoints`/`isLoadingChokepoints` and
+  `loadChokepoints()`; `ContentView.resiliencePanel` (a toggle + ranked
+  top-5 summary, mirroring the web panel) and a `HazardColor.chokepoint`
+  dashed-purple `RiskMapView` layer, one `MapPolyline` per disjoint line
+  piece. Re-fetches on profile change via the existing `profile` Picker's
+  `onChange`. All five touched Swift files re-verified brace/paren-balanced
+  after these additions. `ios/README.md` updated (12 endpoints now
+  covered end to end except the confirmed-unnecessary `/api/route/advisory`).
+
 ## Done (2026-09-12, tenth pass — iOS parity: the two remaining screens)
 
 As with the ninth pass, this pass re-read `docs/STATUS.md`,
@@ -883,9 +984,14 @@ there today; nothing left is blocked on tooling)
    down to only the hours between two changes in safety state, to cut its
    DB-query count if it ever needs to run against a much larger street
    graph than this bbox's; (iv) ~~iOS screens for `/api/route/best_departure`
-   and `POST /api/route/multi_stop`~~ **done this pass (tenth)** — see
+   and `POST /api/route/multi_stop`~~ **done (tenth pass)** — see
    `ContentView.bestDepartureStrip`/`multiStopPanel` above;
-   `/api/route/advisory` was confirmed to need no screen (see `ios/README.md`).
+   `/api/route/advisory` was confirmed to need no screen (see `ios/README.md`);
+   (v) ~~network-wide resilience/chokepoint analysis~~ **done (eleventh
+   pass)** — see `tidestep/resilience.py` above; (vi) ~~iOS screen for
+   `/api/network/chokepoints`~~ **done (eleventh pass)** — see
+   `ContentView.resiliencePanel` above; all 12 backend endpoints now have
+   full iOS coverage except the confirmed-unnecessary `/api/route/advisory`.
 2. `python scripts/validate_stage9.py --days 30` — Stage 9 has never
    actually been run anywhere. The logic is unit-tested and ready
    (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
@@ -926,8 +1032,25 @@ see `CLAUDE.md`). `scripts/hourly_update.py`'s *portable-strftime* fix,
 `docs/LIMITATIONS.md`, and an earlier `docs/STATUS.md` are already
 committed and pushed (`8d779c6`, confirmed via `git log origin/main`).
 Everything else described in this file is still local-only. Files touched
-**this pass (tenth)**:
-- Modified: `ios/TideStep/Models.swift` (`optimize_order`-only fields on
+**this pass (eleventh)**:
+- New: `tidestep/resilience.py` (`Chokepoint`, `find_chokepoints()`,
+  `chokepoints_geojson()`), `tests/test_resilience.py` (+6).
+- Modified: `tidestep/api.py` (`GET /api/network/chokepoints` endpoint),
+  `frontend/index.html` ("Network resilience" panel section, chokepoint
+  map layer + ranked summary), `tests/test_integration.py` (+3),
+  `docs/NOVELTY.md` (+1 entry), `docs/LIMITATIONS.md` (+1 caveat),
+  `docs/STATUS.md` (this section), `ios/TideStep/Models.swift`
+  (`MultiLineStringGeometry`, `ChokepointFeature`/`ChokepointProperties`/
+  `ChokepointFeatureCollection`), `ios/TideStep/APIClient.swift`
+  (`chokepoints(profile:)`), `ios/TideStep/TideStepViewModel.swift`
+  (`showChokepoints`/`chokepoints`/`isLoadingChokepoints` +
+  `loadChokepoints()`), `ios/TideStep/ContentView.swift`
+  (`resiliencePanel`, `chokepointSummary()`, profile-change hook),
+  `ios/TideStep/RiskMapView.swift` (`HazardColor.chokepoint`, chokepoint
+  polyline drawing), `ios/README.md` ("API coverage" / "Known gaps"
+  updated to 12 endpoints).
+- From the tenth pass (already uncommitted, unchanged by this pass):
+  `ios/TideStep/Models.swift` (`optimize_order`-only fields on
   `MultiStopTripProperties`, `optimizeOrder` on `MultiStopRequest`),
   `ios/TideStep/APIClient.swift` (`routeMultiStop()` gains
   `optimizeOrder` param), `ios/TideStep/TideStepViewModel.swift`
@@ -960,20 +1083,21 @@ Everything else described in this file is still local-only. Files touched
 Suggested split, each buildable in one `git add` + `git commit`:
 1. `docs/STATUS.md docs/NOVELTY.md docs/LIMITATIONS.md README.md` — docs.
 2. `tidestep/ scripts/ tests/ requirements-dev.txt` — code + tests (every
-   feature and fix across all nine passes: predictive alerting, dev_seed
-   fixture, validate.py, api/db hardening, the near_inlet caching fix, the
-   hourly_update.py sync_db fix, time-aware routing + trip advisory,
-   route_best_departure(), multi-stop trips + evacuation routing, and
-   this pass's route_multi_stop_optimized()).
-3. `frontend/index.html` — the UI for every routing feature above (small
-   enough to call out on its own so a reviewer can see exactly what
-   changed in the demo-facing surface).
+   feature and fix across all eleven passes: predictive alerting,
+   dev_seed fixture, validate.py, api/db hardening, the near_inlet
+   caching fix, the hourly_update.py sync_db fix, time-aware routing +
+   trip advisory, route_best_departure(), multi-stop trips + evacuation
+   routing, route_multi_stop_optimized(), and this pass's
+   tidestep/resilience.py chokepoint analysis).
+3. `frontend/index.html` — the UI for every routing/resilience feature
+   above (small enough to call out on its own so a reviewer can see
+   exactly what changed in the demo-facing surface).
 4. `ios/` — the SwiftUI client, on its own since it's unreviewed by any
    compiler.
 Or, more simply, one commit for everything:
 ```
 git add -A
-git commit -m "routing: brute-force stop-order optimization + iOS best-departure/multi-stop screens"
+git commit -m "resilience: network-wide chokepoint analysis + iOS best-departure/multi-stop screens"
 git push
 ```
 **Coordinate with your teammate before running this** — this repo's

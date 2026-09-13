@@ -4,7 +4,7 @@
 //
 //  Thin async/await wrapper over the FastAPI backend (tidestep/api.py).
 //  No third-party networking library — URLSession is plenty for this
-//  surface (11 endpoints, all JSON).
+//  surface (12 endpoints, all JSON).
 
 import Foundation
 
@@ -183,6 +183,18 @@ final class APIClient {
             URLQueryItem(name: "olon", value: String(origin.lon)),
             URLQueryItem(name: "profile", value: profile.rawValue),
             URLQueryItem(name: "hour", value: String(hour)),
+        ])
+    }
+
+    /// Network-wide resilience analysis: structural single points of
+    /// failure for `profile`'s usable street network, ranked by how many
+    /// nodes they'd isolate times how many forecast hours they're
+    /// actually unsafe (tidestep/resilience.py). Unlike every other
+    /// endpoint above, this has no origin/destination -- it's a property
+    /// of the whole loaded network for one profile, not one trip.
+    func chokepoints(profile: Profile) async throws -> ChokepointFeatureCollection {
+        try await get("/api/network/chokepoints", query: [
+            URLQueryItem(name: "profile", value: profile.rawValue),
         ])
     }
 

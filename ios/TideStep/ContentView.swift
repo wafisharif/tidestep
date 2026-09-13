@@ -72,7 +72,10 @@ struct ContentView: View {
                 ForEach(Profile.allCases) { p in Text(p.label).tag(p) }
             }
             .pickerStyle(.menu)
-            .onChange(of: vm.profile) { _, _ in Task { await vm.findRoute() } }
+            .onChange(of: vm.profile) { _, _ in
+                Task { await vm.findRoute() }
+                Task { await vm.loadChokepoints() }
+            }
 
             Text("Tap the map to set a start point, tap again for a destination.")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -106,6 +109,8 @@ struct ContentView: View {
             evacuateToSafety
 
             multiStopPanel
+
+            resiliencePanel
 
             legend
         }
@@ -320,12 +325,64 @@ struct ContentView: View {
         .foregroundStyle(.secondary)
     }
 
+    /// "Network resilience" panel (tidestep/resilience.py, GET
+    /// /api/network/chokepoints) -- mirrors frontend/index.html's
+    /// resilience panel. A genuinely different KIND of question from
+    /// everything else on this screen: not "can I get through" for one
+    /// trip, but "which streets, if flooded, cut part of the neighborhood
+    /// off entirely" for the whole current profile's network. Has no
+    /// origin/destination -- the toggle alone drives it.
+    private var resiliencePanel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $vm.showChokepoints) {
+                Text("Network resilience: show chokepoints").font(.caption)
+            }
+            .toggleStyle(.switch)
+            .onChange(of: vm.showChokepoints) { _, _ in Task { await vm.loadChokepoints() } }
+
+            if vm.showChokepoints {
+                Text("Streets that, if flooded, would cut part of the neighborhood off entirely — no other path exists.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                if vm.isLoadingChokepoints {
+                    ProgressView().controlSize(.small)
+                } else if let cp = vm.chokepoints {
+                    chokepointSummary(cp)
+                }
+            }
+        }
+    }
+
+    private func chokepointSummary(_ cp: ChokepointFeatureCollection) -> some View {
+        Group {
+            if cp.features.isEmpty {
+                Text("No structural chokepoints for this profile — every street has some alternate way around.")
+                    .font(.caption2)
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(cp.properties.chokepointCount) chokepoint(s), ranked by priority " +
+                         "(nodes isolated \u{d7} hours unsafe):")
+                        .font(.caption2.bold())
+                    ForEach(Array(cp.features.prefix(5).enumerated()), id: \.offset) { i, f in
+                        let p = f.properties
+                        Text("\(i + 1). isolates \(p.nodesIsolated) node(s) · unsafe \(p.hoursUnsafe)/\(p.hoursTotal) h" +
+                             (p.maxDepthCm > 0 ? " · up to \(p.maxDepthCm) cm" : ""))
+                            .font(.caption2)
+                    }
+                }
+            }
+        }
+        .foregroundStyle(.secondary)
+    }
+
     private var legend: some View {
         HStack(spacing: 10) {
             legendItem(HazardColor.safe, "safe")
             legendItem(HazardColor.passable, "passable")
             legendItem(HazardColor.unsafe, "unsafe")
             legendItem(HazardColor.route, "route")
+            if vm.showChokepoints {
+                legendItem(HazardColor.chokepoint, "chokepoint")
+            }
         }
         .font(.caption2)
     }

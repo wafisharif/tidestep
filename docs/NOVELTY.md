@@ -226,6 +226,35 @@ tool nobody had packaged this way for this problem.
     863.3 m route instead — a 28% reduction, with the improvement coming
     entirely from *which order* to visit the same four points, not a
     different path-finding method.
+12. **Network-wide resilience analysis, not just point-to-point routing.**
+    Every feature above answers some version of "can I get through" for a
+    specific trip. `GET /api/network/chokepoints`
+    (`tidestep/resilience.py`) asks a structurally different question
+    that a Congressional office, not just an individual traveler, would
+    actually care about: *which specific streets, if they flood, cut part
+    of the neighborhood off entirely* — not detoured, no other path
+    exists at all — ranked by how many people/nodes that would strand
+    times how many hours of the current forecast the street is actually
+    unsafe. This is a graph bridge-finding algorithm run over the
+    profile-appropriate street network (a road only counts as an
+    alternate path if that profile can actually use it — a footway is
+    real redundancy for a pedestrian and none at all for a car), correctly
+    distinguishing a physical street's own forward/backward travel
+    directions (not redundant) from a genuinely separate parallel way
+    like a divided highway's second carriageway (real redundancy) — a
+    distinction a naive "is there another edge between these two nodes"
+    check gets wrong in both directions. Demonstrated against the actual
+    running app: the synthetic demo scenario's western end of Shore Rd
+    hangs off the vehicle-only network as a two-segment dead end, and the
+    tool correctly finds *both* segments as separate chokepoints (losing
+    the near one strands 1 node, losing the far one strands both), and
+    correctly ranks the one that actually floods 23 of 24 hours above the
+    one that happens to stay dry this forecast — the same structural
+    weakness, prioritized by whether it's currently a live problem. This
+    is the one feature in the app that isn't about answering "can I get
+    through today" for a traveler at all; it's a resilience-planning tool
+    for exactly the kind of infrastructure-investment question a district
+    office would ask.
 
 ## What TideStep does *not* claim
 

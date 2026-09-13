@@ -70,6 +70,15 @@ final class TideStepViewModel: ObservableObject {
     @Published var tripErrorMessage: String?
     @Published var isPlanningTrip = false
 
+    // Network resilience (tidestep/resilience.py) -- structural single
+    // points of failure for the current profile's street network, with no
+    // origin/destination of its own (a property of the whole network, not
+    // one trip). Mirrors frontend/index.html's "Network resilience" panel:
+    // a toggle turns the layer on/off, and it re-fetches on profile change.
+    @Published var showChokepoints = false
+    @Published var chokepoints: ChokepointFeatureCollection?
+    @Published var isLoadingChokepoints = false
+
     // Saved routes
     @Published var savedRoutes: [SavedRoute] = []
 
@@ -278,6 +287,25 @@ final class TideStepViewModel: ObservableObject {
         } catch {
             tripPlan = nil
             tripErrorMessage = "Couldn't plan this trip: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Network resilience
+
+    /// Loads (or clears) the current profile's chokepoint layer -- mirrors
+    /// frontend/index.html's renderChokepoints(): a no-op that clears the
+    /// layer when showChokepoints is off, otherwise fetches fresh data for
+    /// the current profile. Called both when the toggle flips and when
+    /// the profile changes (see ContentView), so the layer never shows a
+    /// stale profile's chokepoints.
+    func loadChokepoints() async {
+        guard showChokepoints else { chokepoints = nil; return }
+        isLoadingChokepoints = true
+        defer { isLoadingChokepoints = false }
+        do {
+            chokepoints = try await api.chokepoints(profile: profile)
+        } catch {
+            chokepoints = nil
         }
     }
 

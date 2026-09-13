@@ -33,7 +33,7 @@
   #advisory .caption { font-size:11px; color:var(--muted); margin-top:3px; }
   .section { margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
   .section h2 { font-size:12px; font-weight:600; margin:0 0 4px; text-transform:uppercase; letter-spacing:.02em; color:var(--muted); }
-  #tripResult, #safetyResult { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
+  #tripResult, #safetyResult, #chokepointResult { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
 </style>
 </head>
 <body>
@@ -82,11 +82,20 @@
     <div id="safetyResult"></div>
   </div>
 
+  <div class="section">
+    <h2>Network resilience</h2>
+    <div class="hint">Streets that, if flooded, would cut part of the neighborhood off entirely — not a detour, no other path exists at all.</div>
+    <label class="checkrow"><input type="checkbox" id="showChokepoints">
+      show structural chokepoints for this profile</label>
+    <div id="chokepointResult"></div>
+  </div>
+
   <div class="legend">
     <span><i class="sw" style="background:#2e7d32"></i>safe</span>
     <span><i class="sw" style="background:#f9a825"></i>flooded, passable</span>
     <span><i class="sw" style="background:#c62828"></i>unsafe for profile</span>
     <span><i class="sw" style="background:#0b5fff;height:5px"></i>route</span>
+    <span><i class="sw" style="background:#4a148c;height:5px"></i>chokepoint</span>
   </div>
 </div>
 
@@ -321,6 +330,50 @@ async function findSafety() {
 }
 $('findSafety').onclick = findSafety;
 
+// --- network resilience: structural chokepoints --------------------------
+// A genuinely different KIND of question from every routing feature above:
+// not "can I get from A to B" but "which streets, if this one floods, cut
+// part of the neighborhood off with NO other path at all -- not a longer
+// detour, actually disconnected" (Router-independent graph analysis; see
+// tidestep/resilience.py). Has no origin/destination of its own -- it's a
+// property of the whole network for the selected profile, not one trip.
+let chokepointLayer = null;
+
+async function renderChokepoints() {
+  const el = $('chokepointResult');
+  if (!$('showChokepoints').checked) {
+    if (chokepointLayer) { map.removeLayer(chokepointLayer); chokepointLayer = null; }
+    el.style.display = 'none';
+    return;
+  }
+  const r = await fetch('/api/network/chokepoints?profile=' + $('profile').value);
+  const fc = await r.json();
+  if (chokepointLayer) map.removeLayer(chokepointLayer);
+  chokepointLayer = L.geoJSON(fc, {
+    style: { color: '#4a148c', weight: 6, opacity: 0.9, dashArray: '2,8', lineCap: 'round' },
+    onEachFeature: (f, layer) => {
+      const p = f.properties;
+      layer.bindPopup(`<b>Structural chokepoint</b><br>
+        isolates <b>${p.nodes_isolated}</b> node(s) if lost — no other path exists<br>
+        unsafe ${p.hours_unsafe} of ${p.hours_total} hours this forecast` +
+        (p.max_depth_cm ? ` · up to ${p.max_depth_cm} cm deep` : ''));
+    },
+  }).addTo(map);
+  el.style.display = 'block';
+  if (!fc.features.length) {
+    el.innerHTML = `No structural chokepoints for this profile — every street has some alternate way around.`;
+    return;
+  }
+  const top = fc.features.slice(0, 5).map((f, i) => {
+    const p = f.properties;
+    return `${i + 1}. isolates ${p.nodes_isolated} node(s) · unsafe ${p.hours_unsafe}/${p.hours_total} h` +
+      (p.max_depth_cm ? ` · up to ${p.max_depth_cm} cm` : '');
+  }).join('<br>');
+  el.innerHTML = `<b>${fc.properties.chokepoint_count}</b> chokepoint(s) found, ranked by priority ` +
+    `(nodes isolated × hours unsafe):<br>${top}`;
+}
+$('showChokepoints').onchange = renderChokepoints;
+
 map.on('click', e => {
   if ($('multiStopMode').checked) { addStop(e.latlng); return; }
   if (!start) { start = e.latlng; startMk = L.marker(start).addTo(map); $('from').value = fmtLL(start); }
@@ -332,7 +385,7 @@ $('clear').onclick = () => {
   start = dest = null; [startMk, destMk, routeLayer].forEach(l => l && map.removeLayer(l));
   $('from').value = $('to').value = ''; $('result').style.display = 'none'; $('advisory').innerHTML = '';
 };
-$('profile').onchange = () => { if (riskLayer) riskLayer.setStyle(style); route(); };
+$('profile').onchange = () => { if (riskLayer) riskLayer.setStyle(style); route(); renderChokepoints(); };
 $('timeAware').onchange = route;
 $('slider').oninput = e => showHour(+e.target.value);
 

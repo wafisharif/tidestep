@@ -480,3 +480,79 @@ struct SavedRouteCreated: Codable {
     let routeId: Int
     enum CodingKeys: String, CodingKey { case routeId = "route_id" }
 }
+
+// MARK: - GET /api/network/chokepoints — network-wide resilience analysis
+// (tidestep/resilience.py), a GeoJSON FeatureCollection of structural
+// single points of failure. Genuinely different shape from every routing
+// endpoint above: no origin/destination, and each Feature's geometry is a
+// MultiLineString (ST_Collect of that chokepoint's constituent
+// hazard-model segments -- see tidestep/segments.py's note on splitting a
+// graph edge into pieces), which can be several disjoint line pieces
+// rather than one continuous line, so this needs its own geometry type
+// rather than reusing LineStringGeometry.
+
+/// Decoded by hand for the same reason LineStringGeometry is: no built-in
+/// Codable support for "array of arrays of 2-tuples", and GeoJSON's
+/// [lon, lat] order is the opposite of CoreLocation's (lat, lon).
+struct MultiLineStringGeometry: Codable {
+    let lines: [[CLLocationCoordinate2D]]
+
+    enum CodingKeys: String, CodingKey { case type, coordinates }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try c.decode([[[Double]]].self, forKey: .coordinates)
+        lines = raw.map { line in line.map { CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0]) } }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode("MultiLineString", forKey: .type)
+        try c.encode(lines.map { pts in pts.map { [$0.longitude, $0.latitude] } }, forKey: .coordinates)
+    }
+}
+
+struct ChokepointProperties: Codable {
+    let u: Int
+    let v: Int
+    let key: Int
+    let nodesIsolated: Int      // size of the smaller side if this segment is lost
+    let hoursUnsafe: Int        // of hoursTotal, how many this segment is unsafe for the requested profile
+    let hoursTotal: Int
+    let maxDepthCm: Int
+    let priorityScore: Int      // nodesIsolated * hoursUnsafe -- see tidestep/resilience.py
+
+    enum CodingKeys: String, CodingKey {
+        case u, v, key
+        case nodesIsolated = "nodes_isolated"
+        case hoursUnsafe = "hours_unsafe"
+        case hoursTotal = "hours_total"
+        case maxDepthCm = "max_depth_cm"
+        case priorityScore = "priority_score"
+    }
+}
+
+struct ChokepointFeature: Codable, Identifiable {
+    let geometry: MultiLineStringGeometry
+    let properties: ChokepointProperties
+
+    // (u, v, key) uniquely identifies a graph edge -- there's no single
+    // segment_id here since a chokepoint's geometry can span several
+    // hazard-model sub-segments (see the MARK comment above).
+    var id: String { "\(properties.u)-\(properties.v)-\(properties.key)" }
+}
+
+struct ChokepointCollectionProperties: Codable {
+    let profile: String
+    let chokepointCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case profile
+        case chokepointCount = "chokepoint_count"
+    }
+}
+
+struct ChokepointFeatureCollection: Codable {
+    let features: [ChokepointFeature]
+    let properties: ChokepointCollectionProperties
+}

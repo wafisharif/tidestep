@@ -32,6 +32,13 @@ GET  /api/route/to_safety?olat&olon&profile&hour
                                          evacuation-style routing: nearest reachable point that
                                          stays flood-safe for the rest of the forecast window, no
                                          destination required (Router.route_to_safety)
+GET  /api/network/chokepoints?profile=adult
+                                         network-wide resilience analysis: which street
+                                         segments are structural single points of failure
+                                         (no other path exists at all, not just a longer
+                                         one) for `profile`'s usable network, ranked by how
+                                         many nodes they'd isolate times how many forecast
+                                         hours they're actually unsafe (tidestep/resilience.py)
 GET  /api/routes                        saved routes
 POST /api/routes                        save a route for alerting
 DELETE /api/routes/{id}
@@ -48,7 +55,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-from . import config, db, hazard, routing, streets
+from . import config, db, hazard, resilience, routing, streets
 
 app = FastAPI(title="TideStep", version="0.1")
 FRONTEND = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
@@ -267,6 +274,22 @@ def get_route_to_safety(olat: float, olon: float, profile: str = "adult",
                                                       "for this profile in the forecast window"}},
                             status_code=200)
     return router().safe_haven_geojson(res)
+
+
+@app.get("/api/network/chokepoints")
+def get_chokepoints(profile: str = "adult"):
+    """Network-wide resilience analysis, not a point-to-point route: which
+    street segments are structural single points of failure for
+    ``profile``'s usable street network (removing one disconnects the
+    network -- no other path exists at all, however long), ranked by
+    ``priority_score`` = nodes isolated if it's lost x how many of this
+    forecast's hours it's actually unsafe (see tidestep/resilience.py for
+    why this is a genuinely different question from anything the routing
+    endpoints above answer, and why it needs its own bridge-finding
+    algorithm rather than reusing Router's shortest-path machinery)."""
+    if profile not in hazard.PROFILES:
+        raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
+    return resilience.chokepoints_geojson(router().G, engine(), profile)
 
 
 class SavedRoute(BaseModel):

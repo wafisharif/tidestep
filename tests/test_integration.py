@@ -324,3 +324,68 @@ def test_route_window_matches_per_profile_flood_timing(seeded_app):
     win = R.route_window((40.9, -73.6998), (40.9, -73.6748), "vehicle_small", range(24))
     assert win.first_unsafe_hour is not None
     assert win.first_unsafe_hour <= 7   # must catch it no later than the known peak hour
+
+
+def test_chokepoints_endpoint_finds_no_bridges_for_pedestrians(seeded_app):
+    """dev_seed's synthetic street grid (scripts/dev_seed.py:build_graph) is
+    a full 3-row x 4-column mesh for pedestrians -- every row and every
+    column is connected, including the two footway-only links (node 1-3
+    and 7-8) that only pedestrians can use. A full mesh like that is
+    2-edge-connected: every edge has some alternate way around, so there
+    must be ZERO structural chokepoints for child/adult."""
+    client, *_ = seeded_app
+    r = client.get("/api/network/chokepoints", params={"profile": "adult"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["type"] == "FeatureCollection"
+    assert body["properties"]["chokepoint_count"] == 0
+    assert body["features"] == []
+
+
+def test_chokepoints_endpoint_finds_the_real_vehicle_only_chokepoints(seeded_app):
+    """For vehicle profiles, the two footway-only links (node 1-3 and 7-8)
+    are unusable, which leaves nodes 1 and 7 -- the western end of Shore
+    Rd -- hanging off the rest of the grid as a dead-end spur: node 1
+    reaches the network only through edge 1-7, and {1, 7} together reach
+    it only through edge 7-10. Both are real, hand-verifiable single
+    points of failure baked into the synthetic scenario -- a dead-end
+    spur has one bridge per segment along it, not just one for the whole
+    spur. This is the concrete case that proves the algorithm answers a
+    genuinely different question than routing does: it isn't about
+    whether THIS trip is blocked, it's about whether ANY path exists at
+    all.
+
+    The two also make the point of ``priority_score`` concrete: edge 1-7
+    is both a chokepoint AND floods almost the entire forecast for
+    vehicles (Shore Rd's low western end), while edge 7-10 is a
+    chokepoint that happens to stay dry all 24 hours for this profile --
+    structurally fragile but not, this forecast, actually a problem. The
+    ranking must put the flooding one first."""
+    client, *_ = seeded_app
+    r = client.get("/api/network/chokepoints", params={"profile": "vehicle_small"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["properties"]["chokepoint_count"] == 2
+    feats = body["features"]
+    by_pair = {frozenset((f["properties"]["u"], f["properties"]["v"])): f["properties"]
+              for f in feats}
+    assert by_pair.keys() == {frozenset((1, 7)), frozenset((7, 10))}
+    spur_tip = by_pair[frozenset((1, 7))]
+    spur_mid = by_pair[frozenset((7, 10))]
+    assert spur_tip["nodes_isolated"] == 1     # losing 1-7 strands node 1 alone
+    assert spur_mid["nodes_isolated"] == 2     # losing 7-10 strands {1, 7} together
+    assert spur_tip["hours_unsafe"] > spur_mid["hours_unsafe"]
+    for props in (spur_tip, spur_mid):
+        assert props["hours_total"] == 24
+        # priority_score is a pure derived field -- must always self-check
+        assert props["priority_score"] == props["nodes_isolated"] * props["hours_unsafe"]
+    # ranked by priority_score descending -- the flooding chokepoint first
+    assert feats[0]["properties"] == spur_tip
+    for f in feats:
+        assert f["geometry"]["type"] in ("LineString", "MultiLineString")
+
+
+def test_chokepoints_endpoint_rejects_bad_profile_against_real_app(seeded_app):
+    client, *_ = seeded_app
+    r = client.get("/api/network/chokepoints", params={"profile": "bogus"})
+    assert r.status_code == 400
