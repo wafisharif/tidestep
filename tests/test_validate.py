@@ -97,6 +97,35 @@ def test_summarize_sensitivity_and_specificity():
     assert s["overall_accuracy"] == pytest.approx(0.75)
 
 
+def test_flood_extent_correlation_detects_a_clean_linear_response():
+    """A model that correctly ponds more streets as water rises should show
+    a strong positive correlation, computable even when EVERY sampled day
+    is calm (never reaches NWS minor stage) -- exactly the real-world case
+    this metric exists for (see validate.py's module docstring)."""
+    rows = [
+        validate.DayResult(f"2025-01-{i+1:02d}", wl, False, False, False, segs, 0, False)
+        for i, (wl, segs) in enumerate([
+            (0.66, 52), (0.77, 52), (0.89, 66), (0.91, 66), (1.03, 94),
+            (1.15, 104), (1.23, 112), (1.30, 116), (1.40, 128), (1.56, 172),
+        ])
+    ]
+    s = validate.summarize(rows)
+    assert s["n_exceeded_minor"] == 0   # confirms this is the all-calm case
+    assert s["flood_extent_correlation_r"] == pytest.approx(0.97, abs=0.02)
+    assert s["flood_extent_correlation_r2"] == pytest.approx(0.94, abs=0.03)
+
+
+def test_flood_extent_correlation_none_without_enough_variation():
+    single = [validate.DayResult("2025-01-01", 1.0, False, False, False, 10, 20, True)]
+    assert validate.summarize(single)["flood_extent_correlation_r"] is None
+
+    same_wl = [
+        validate.DayResult("2025-01-01", 1.0, False, False, False, 10, 20, True),
+        validate.DayResult("2025-01-02", 1.0, False, False, False, 20, 30, True),
+    ]
+    assert validate.summarize(same_wl)["flood_extent_correlation_r"] is None
+
+
 def test_pick_sample_dates_deterministic_and_in_range():
     end = datetime(2026, 1, 1, tzinfo=timezone.utc)
     start = end - timedelta(days=100)
