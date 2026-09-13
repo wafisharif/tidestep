@@ -117,3 +117,15 @@ WALK_SPEED_MPS = {
     "child": 1.0,
     "adult": 1.4,
 }
+
+# --- Real shelter-location preference for route_to_safety (Stage 11) -------
+# tidestep/shelters.py fetches real candidate shelter buildings (schools,
+# hospitals, fire/police stations, community centers) from OSM. Once loaded
+# into the DB, Router.route_to_safety() prefers an always-safe node that
+# snaps onto one of these real buildings over an arbitrary dry street --
+# see routing.py's _shelter_preferred_targets(). SHELTER_ANNOTATE_MAX_M is
+# purely a display bound: how far a found haven may be from a real shelter
+# and still be reported as "at <name>" in the API/UI. It does not affect
+# which haven gets picked, only whether the result is annotated with a
+# building name.
+SHELTER_ANNOTATE_MAX_M = 120

@@ -103,6 +103,26 @@ def build_graph() -> nx.MultiDiGraph:
     return G
 
 
+def build_shelters_gdf() -> gpd.GeoDataFrame:
+    """Two synthetic shelter buildings so the shelter-preference feature
+    (tidestep/shelters.py / db.load_shelters / Router._shelter_preferred_targets)
+    is exercisable offline, without any Overpass access: one right next to
+    node 6 (the inland end of Basin Rd, which build_dem()/synthetic_tide()
+    keep dry all 24 hours -- see the module docstring's "cut-off inland
+    basin" description), so route_to_safety() should prefer it, and one far
+    off in open water at (ORIGIN_LON, ORIGIN_LAT) that is deliberately
+    unreachable by any street node -- a distractor confirming the nearest-
+    node snap doesn't accidentally pick an inaccessible "shelter" just
+    because it's geometrically close to nothing in particular."""
+    def ll(col, row):
+        return (ORIGIN_LON + col * DEG_PER_M_LON, ORIGIN_LAT - row * DEG_PER_M_LAT)
+    return gpd.GeoDataFrame(
+        {"osmid": ["synshelter1", "synshelter2"],
+         "name": ["Cove Harbor Elementary", "Offshore Buoy Station"],
+         "kind": ["school", "community center"]},
+        geometry=[Point(ll(280, 220)), Point(ll(-50, -50))], crs=4326)
+
+
 def synthetic_tide(hours: int = 24) -> pd.Series:
     """A plausible 24 h semidiurnal-ish tide: two highs, peak at hour 9
     reaching 1.0 m NAVD88 (floods Shore Rd + Cove Rd but not Basin Rd)."""
@@ -196,7 +216,10 @@ def main():
     db.init_schema(engine)
     db.load_segments(engine, segs)
     db.load_hazard(engine, table, ofs_bias_m=0.0)
-    print(f"loaded into PostGIS: {len(segs)} segments, {len(table)} hazard rows")
+    shelters = build_shelters_gdf()
+    db.load_shelters(engine, shelters)
+    print(f"loaded into PostGIS: {len(segs)} segments, {len(table)} hazard rows, "
+          f"{len(shelters)} shelters")
     print("hours in DB:", len(db.valid_times(engine)))
 
 

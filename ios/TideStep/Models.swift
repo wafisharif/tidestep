@@ -419,6 +419,15 @@ struct SafeHavenProperties: Codable {
     let arrivalHour: Int?
     let maxDepthCmOnRoute: Int?
     let alreadySafe: Bool?
+    // Stage 11: real shelter-location preference (tidestep/shelters.py) --
+    // present (non-nil name) only when the haven found is near an actual
+    // shelter building; nil for a plain "any dry street" haven, exactly
+    // like every backend that predates this field (missing JSON keys
+    // decode as nil for Optional Codable properties, so this is safe
+    // against an older backend too).
+    let usedShelterPreference: Bool?
+    let shelterName: String?
+    let shelterKind: String?
     let error: String?
 
     enum CodingKeys: String, CodingKey {
@@ -428,6 +437,9 @@ struct SafeHavenProperties: Codable {
         case arrivalHour = "arrival_hour"
         case maxDepthCmOnRoute = "max_depth_cm_on_route"
         case alreadySafe = "already_safe"
+        case usedShelterPreference = "used_shelter_preference"
+        case shelterName = "shelter_name"
+        case shelterKind = "shelter_kind"
         case error
     }
 }

@@ -230,15 +230,25 @@ struct ContentView: View {
         }
     }
 
+    // Stage 11: when route_to_safety() found a real shelter building
+    // (tidestep/shelters.py) near the haven, name it instead of only
+    // reporting a bare distance/time -- matches frontend/index.html's
+    // shelterNote in findSafety().
+    private func shelterNote(_ p: SafeHavenProperties) -> String {
+        guard let name = p.shelterName, !name.isEmpty else { return "" }
+        if let kind = p.shelterKind, !kind.isEmpty { return " at \(name) (\(kind))" }
+        return " at \(name)"
+    }
+
     private func safetySummary(_ p: SafeHavenProperties) -> some View {
         Group {
             if p.alreadySafe == true {
-                Text("You're already somewhere that stays safe for the rest of the forecast.")
+                Text("You're already somewhere that stays safe for the rest of the forecast\(shelterNote(p)).")
                     .font(.caption2)
             } else {
                 let km = (p.lengthM ?? 0) / 1000
-                Text(String(format: "Nearest safe haven: %.2f km, ~%.1f min away.",
-                           km, p.travelTimeMin ?? 0))
+                Text(String(format: "Nearest safe haven%@: %.2f km, ~%.1f min away.",
+                           shelterNote(p), km, p.travelTimeMin ?? 0))
                     .font(.caption2)
             }
         }

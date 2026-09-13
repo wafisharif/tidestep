@@ -51,6 +51,7 @@ def engine():
         conn.execute(text("DELETE FROM hazard"))
         conn.execute(text("DELETE FROM segments"))
         conn.execute(text("DELETE FROM saved_routes"))
+        conn.execute(text("DELETE FROM shelters"))
     yield eng
 
 
@@ -95,7 +96,7 @@ def test_init_schema_creates_all_tables_and_postgis(engine):
     with engine.connect() as conn:
         tables = {r[0] for r in conn.execute(text(
             "SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))}
-        assert {"segments", "hazard", "forecast_runs", "saved_routes"} <= tables
+        assert {"segments", "hazard", "forecast_runs", "saved_routes", "shelters"} <= tables
         assert conn.execute(text("SELECT postgis_version()")).scalar_one()
 
 
@@ -202,6 +203,72 @@ def test_edge_hazard_aggregates_max_depth_and_bool_and_across_segments(engine):
     assert edge_hz.loc[(1, 2, 0), "depth_cm"] == 60
     assert edge_hz.loc[(1, 2, 0), "safe_adult"] == False  # noqa: E712
     assert edge_hz.loc[(2, 3, 0), "safe_adult"] == True   # noqa: E712
+
+
+def _two_shelters() -> gpd.GeoDataFrame:
+    from shapely.geometry import Point
+    return gpd.GeoDataFrame(
+        {"osmid": ["s1", "s2"], "name": ["Cove Harbor Elementary", "Kings Point Fire Dept"],
+         "kind": ["school", "fire station"]},
+        geometry=[Point(-73.71, 40.80), Point(-73.70, 40.81)], crs=4326)
+
+
+def test_load_shelters_round_trip(engine):
+    from tidestep import db
+    n = db.load_shelters(engine, _two_shelters())
+    assert n == 2
+    with engine.connect() as conn:
+        count = conn.execute(text("SELECT count(*) FROM shelters")).scalar_one()
+    assert count == 2
+
+
+def test_load_shelters_replaces_previous_run(engine):
+    from tidestep import db
+    db.load_shelters(engine, _two_shelters())
+    db.load_shelters(engine, _two_shelters().iloc[[0]])
+    with engine.connect() as conn:
+        count = conn.execute(text("SELECT count(*) FROM shelters")).scalar_one()
+    assert count == 1
+
+
+def test_shelter_points_returns_lat_lon_for_every_loaded_shelter(engine):
+    from tidestep import db
+    db.load_shelters(engine, _two_shelters())
+    rows = db.shelter_points(engine)
+    assert len(rows) == 2
+    names = {r["name"] for r in rows}
+    assert names == {"Cove Harbor Elementary", "Kings Point Fire Dept"}
+    school = next(r for r in rows if r["name"] == "Cove Harbor Elementary")
+    assert school["lat"] == pytest.approx(40.80)
+    assert school["lon"] == pytest.approx(-73.71)
+    assert school["kind"] == "school"
+
+
+def test_shelter_points_empty_when_nothing_loaded(engine):
+    from tidestep import db
+    assert db.shelter_points(engine) == []
+
+
+def test_nearest_shelter_finds_closest_within_radius(engine):
+    from tidestep import db
+    db.load_shelters(engine, _two_shelters())
+    # right on top of the school (-73.71, 40.80); the fire dept is ~1.3 km away
+    row = db.nearest_shelter(engine, 40.8001, -73.7101, max_m=200)
+    assert row is not None
+    assert row["name"] == "Cove Harbor Elementary"
+    assert row["distance_m"] < 200
+
+
+def test_nearest_shelter_returns_none_outside_radius(engine):
+    from tidestep import db
+    db.load_shelters(engine, _two_shelters())
+    row = db.nearest_shelter(engine, 40.8001, -73.7101, max_m=1)
+    assert row is None
+
+
+def test_nearest_shelter_returns_none_when_table_empty(engine):
+    from tidestep import db
+    assert db.nearest_shelter(engine, 40.80, -73.71, max_m=1000) is None
 
 
 def test_saved_routes_crud_and_state_update(engine):

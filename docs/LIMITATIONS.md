@@ -40,11 +40,27 @@ notice. Each one is also called out in the module it applies to.
   steady model bias but not timing errors (the model predicting the right
   peak height at the wrong hour), which would need a more sophisticated
   correction (e.g. dynamic time warping against the observed curve).
-- **Threshold source mismatch is possible.** NWS flood thresholds
-  (`FLOOD_THRESHOLDS_M_NAVD88`) are impact-based categories (property
-  damage/life risk), not derived from the same depth-safety literature as
-  the child/adult/vehicle thresholds. We use NWS levels only as a
-  sanity-check reference, not as an input to the hazard classification.
+- **Threshold source mismatch is real, and confirmed against real data
+  (Stage 9, 2026-09-13).** NWS flood thresholds (`FLOOD_THRESHOLDS_M_NAVD88`)
+  are impact-based categories (property damage/life risk), not derived from
+  the same depth-safety literature as the child/adult/vehicle thresholds,
+  and we use NWS levels only as a sanity-check reference, not as an input
+  to the hazard classification. `scripts/validate_stage9.py`, run against
+  30 real NOAA-observed days spanning 15 months, confirmed this concretely:
+  every sampled day stayed below NWS minor stage (~1.77 m NAVD88), yet the
+  model predicted some flooding (52-172 segments) on every one of them —
+  because TideStep's DEM-based ponding model is deliberately more
+  sensitive, catching routine nuisance/"sunny-day" flooding on the lowest
+  shoreline segments well before NWS would call it "flooding" at all. This
+  is not a bug: the predicted flooded-segment count correlated with
+  observed peak water level at r=0.97 (r²=0.94) across those same 30 days
+  — a smooth, physically correct response, confirming the pipeline reacts
+  correctly to real water-level changes even though no sampled day reached
+  an NWS category. A binary sensitivity/specificity check against NWS
+  categories only becomes meaningful with a sample that includes at least
+  one real NWS-minor-or-higher day (see `validate.py`'s module docstring
+  and `tidestep/validate.py::flood_extent_correlation`, which is the
+  metric to report when no such day is present).
 
 ## Routing
 
@@ -108,16 +124,35 @@ notice. Each one is also called out in the module it applies to.
   cap; would need one past it), and it optimizes total travel time only —
   it has no concept of appointment times or stop-specific time windows
   ("must be at the pharmacy before it closes at 6").
-- **`route_to_safety()`'s "safe haven" is any point that stays flood-safe
-  for the rest of the modeled window** (`db.always_safe_nodes()`) — it is
-  not aware of which of those points are actually meaningful shelter
-  (a school, a firehouse, high ground with parking) versus just a random
-  dry street segment. Distinguishing real shelter locations from merely
-  dry pavement would need a POI dataset this project doesn't currently
-  load. It is also, like the rest of the router, still-water-ponding-only
+- **`route_to_safety()`'s "safe haven" prefers a real shelter building when
+  that data is loaded, but still falls back to "any dry street" otherwise**
+  (Stage 11, `tidestep/shelters.py` + `db.load_shelters`/`shelter_points`/
+  `nearest_shelter` + `Router._shelter_preferred_targets`). The fetch code
+  pulls real schools, hospitals, fire stations, police stations, and
+  community centers from OpenStreetMap for the study bbox — the same
+  five building types FEMA/Red Cross public-shelter guidance actually
+  uses — and once loaded into Postgres, `route_to_safety()` narrows its
+  search to always-safe nodes near one of them, annotating the result
+  with the shelter's name/kind (`used_shelter_preference`, `shelter_name`,
+  `shelter_kind` in the API response). **As of this pass the fetch has not
+  yet been run against live Overpass data**: this sandbox's outbound proxy
+  denies `overpass-api.de` (a confirmed organizational egress policy, not
+  a bug — see `docs/STATUS.md`), and the fetch needs to be run from the
+  laptop instead (`python -c "from tidestep import shelters; shelters.fetch_shelters()"`,
+  then reload with `load_shelters`) — see `docs/STATUS.md`'s Next section
+  for the exact command. Until that real fetch is run and loaded, the app
+  behaves exactly as before this pass: any dry street still counts as a
+  haven. The preference logic itself (narrowing, annotation, and graceful
+  fallback when no shelter data is available or none is near a safe node)
+  is unit- and integration-tested against synthetic shelter fixtures
+  (`tests/test_shelters.py`, `tests/test_routing.py`,
+  `tests/test_db.py`, `tests/test_integration.py`) and against
+  `scripts/dev_seed.py`'s two-shelter synthetic scenario for an offline
+  demo. It is also, like the rest of the router, still-water-ponding-only
   (see "Hydraulic model" above) — it has no concept of which direction a
-  storm is moving or which shelter would still be reachable if conditions
-  worsened beyond what NYOFS currently forecasts.
+  storm is moving, a shelter's actual capacity or open/closed status, or
+  whether a shelter would still be reachable if conditions worsened beyond
+  what NYOFS currently forecasts.
 - **MVP router is a full graph recompute per query** (networkx Dijkstra
   for the plain router; a hand-rolled Dijkstra over `(elapsed_time, node)`
   state for the time-aware router, run up to once per forecast hour for

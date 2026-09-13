@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tidestep import coops, dem, streets  # noqa: E402
+from tidestep import coops, dem, shelters, streets  # noqa: E402
 
 
 def main():
@@ -29,11 +29,17 @@ def main():
     path = dem.fetch_dem()
     print(path)
 
-    print("4/4 streets + water ...", end=" ", flush=True)
+    print("4/5 streets + water ...", end=" ", flush=True)
     G = streets.fetch_graph()
     water = streets.fetch_water()
     print(f"{G.number_of_nodes()} nodes, {G.number_of_edges()} edges, "
           f"{len(water)} water features")
+
+    print("5/5 shelters (schools, hospitals, fire/police, community centers) ...",
+          end=" ", flush=True)
+    shelter_gdf = shelters.fetch_shelters()
+    print(f"{len(shelter_gdf)} candidate shelter buildings "
+          f"-> {shelters.SHELTERS_PATH} (load into Postgres with scripts/load_db.py)")
 
 
 if __name__ == "__main__":

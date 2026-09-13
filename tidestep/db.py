@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS hazard (
 );
 CREATE INDEX IF NOT EXISTS hazard_hour_idx ON hazard (forecast_hour);
 
+CREATE TABLE IF NOT EXISTS shelters (
+    shelter_id  SERIAL PRIMARY KEY,
+    osmid       TEXT,
+    name        TEXT,
+    kind        TEXT NOT NULL,
+    geom        geometry(Point, 4326) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shelters_geom_idx ON shelters USING GIST (geom);
+
 CREATE TABLE IF NOT EXISTS saved_routes (
     route_id    SERIAL PRIMARY KEY,
     label       TEXT,
@@ -231,6 +240,76 @@ def edge_hazard(engine, forecast_hour: int) -> pd.DataFrame:
     """
     with engine.connect() as conn:
         return pd.read_sql(text(sql), conn, params={"h": forecast_hour})
+
+
+# --- shelters (Stage 11) -------------------------------------------------------
+# Real candidate shelter buildings from tidestep/shelters.py's OSM fetch.
+# This is an optional preference layer for Router.route_to_safety(), not a
+# required table: every function below is written so a DB from before this
+# feature (no shelters table at all) or one where the fetch was simply never
+# run (empty table) degrades to "no shelter data available" rather than
+# raising, so route_to_safety() falls all the way back to its original
+# "any dry street" behavior. See routing.py's _shelter_preferred_targets().
+
+def load_shelters(engine, shelters: gpd.GeoDataFrame) -> int:
+    """Replace the shelters table with ``shelters`` (from
+    shelters.fetch_shelters). Safe to never call at all -- an app that
+    never loads shelter data just keeps the pre-Stage-11 behavior."""
+    cols = ["osmid", "name", "kind", "geometry"]
+    gdf = shelters[[c for c in cols if c in shelters.columns]].copy()
+    gdf = gdf.rename(columns={"geometry": "geom"}).set_geometry("geom")
+    gdf = gdf.set_crs(4326, allow_override=True)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM shelters"))
+    gdf.to_postgis("shelters", engine, if_exists="append", index=False)
+    return len(gdf)
+
+
+def shelter_points(engine) -> list[dict]:
+    """Every loaded shelter as ``{shelter_id, name, kind, lat, lon}`` --
+    used by Router.route_to_safety() to snap shelters onto street-graph
+    nodes in-process (ox.nearest_nodes), the same way an origin/destination
+    point is snapped. Returns ``[]`` (never raises) if the shelters table
+    doesn't exist yet -- e.g. a DB created before this feature -- or is
+    simply empty, since this is an optional preference layer, not a
+    required one."""
+    sql = "SELECT shelter_id, name, kind, ST_Y(geom) AS lat, ST_X(geom) AS lon FROM shelters"
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(sql)).all()
+    except Exception:
+        return []
+    return [dict(r._mapping) for r in rows]
+
+
+def nearest_shelter(engine, lat: float, lon: float, max_m: float) -> dict | None:
+    """Nearest loaded shelter within ``max_m`` meters of (lat, lon), or
+    None -- used only to annotate a route_to_safety() result with a
+    human-readable name/kind (e.g. "Kings Point Fire Dept" rather than a
+    bare coordinate). Never raises; a missing/empty shelters table just
+    means no annotation is added.
+
+    ``::geography`` casts give an accurate meter-based distance regardless
+    of latitude -- the table's geometry column is stored in EPSG:4326
+    (degrees), which ST_Distance/ST_DWithin would otherwise treat as a
+    flat-degree unit, exactly the accurate-proximity concern already
+    documented for hazard.py's near-inlet buffering."""
+    sql = """
+    SELECT name, kind,
+           ST_Distance(geom::geography,
+                       ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography) AS distance_m
+    FROM shelters
+    WHERE ST_DWithin(geom::geography,
+                     ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography, :max_m)
+    ORDER BY distance_m ASC
+    LIMIT 1
+    """
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(sql), {"lat": lat, "lon": lon, "max_m": max_m}).first()
+    except Exception:
+        return None
+    return dict(row._mapping) if row else None
 
 
 # --- saved routes (Stage 8) ---------------------------------------------------

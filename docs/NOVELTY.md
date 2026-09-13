@@ -255,6 +255,25 @@ tool nobody had packaged this way for this problem.
     through today" for a traveler at all; it's a resilience-planning tool
     for exactly the kind of infrastructure-investment question a district
     office would ask.
+13. **Evacuation routing that targets real buildings, not just dry
+    pavement.** Item 10's `route_to_safety()` originally treated any
+    street segment that stayed flood-safe as a valid destination — honest,
+    but not what a real evacuee needs, since a dry intersection with
+    nothing on it isn't actually shelter. `tidestep/shelters.py` fetches
+    real candidate shelter buildings from OpenStreetMap (schools,
+    hospitals, fire/police stations, community centers — the same five
+    building types FEMA/Red Cross public-shelter guidance designates), and
+    `Router.route_to_safety()` now narrows its search to always-safe nodes
+    near one of those real buildings whenever that data has been loaded,
+    naming the specific building in the result (`shelter_name`,
+    `shelter_kind`) instead of just reporting a distance. The fallback is
+    engineered, not incidental: no shelter data loaded, a shelter that
+    doesn't happen to sit near any node the flood model actually confirms
+    is safe, or any DB error all degrade cleanly back to the original "any
+    dry street" search rather than turning a working feature into a
+    failure — verified directly by tests that force each of those cases
+    (`tests/test_routing.py`'s shelter-preference tests) rather than just
+    asserting the happy path.
 
 ## What TideStep does *not* claim
 

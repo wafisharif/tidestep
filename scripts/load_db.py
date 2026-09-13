@@ -2,6 +2,13 @@
 
 Needs the database running (docker compose up -d) and DATABASE_URL set
 if it is not the docker-compose default.
+
+Stage 11: also loads data/shelters.gpkg (tidestep/shelters.fetch_shelters())
+into the shelters table if that file exists, so Router.route_to_safety()
+can prefer real shelter buildings. This step is optional and silently
+skipped if the file isn't there yet -- run
+``python -c "from tidestep import shelters; shelters.fetch_shelters()"``
+first (from a machine that can reach Overpass) to produce it.
 """
 import sys
 from pathlib import Path
@@ -10,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import geopandas as gpd  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from tidestep import db  # noqa: E402
+from tidestep import db, shelters  # noqa: E402
 from tidestep.dem import DATA_DIR  # noqa: E402
 
 
@@ -24,6 +31,13 @@ def main():
     bias = float(wl["ofs_bias_m"].iloc[0]) if "ofs_bias_m" in wl else 0.0
     print("hazard rows:", db.load_hazard(engine, hz, bias))
     print("hours:", len(db.valid_times(engine)))
+
+    if shelters.SHELTERS_PATH.exists():
+        shelter_gdf = gpd.read_file(shelters.SHELTERS_PATH)
+        print("shelters:", db.load_shelters(engine, shelter_gdf))
+    else:
+        print(f"no {shelters.SHELTERS_PATH} yet -- route_to_safety() will keep using "
+              f"'any dry street' until you run shelters.fetch_shelters() and re-run this script")
 
 
 if __name__ == "__main__":

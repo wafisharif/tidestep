@@ -532,6 +532,183 @@ def test_route_to_safety_queries_havens_from_departure_hour_onward(monkeypatch):
     assert spy.calls == [(list(range(5, config.MAX_HOUR + 1)), "adult")]
 
 
+# --- route_to_safety: real shelter-location preference (Stage 11) ---------
+# tidestep/shelters.py fetches real candidate shelter buildings; once
+# loaded, Router.route_to_safety() should prefer an always-safe node near
+# one of them. FakeDBWithHavens (above) has no shelter_points/
+# nearest_shelter methods at all, which is itself the important case: every
+# route_to_safety test above already proves prefer_shelters=True (the
+# default) doesn't change behavior one bit when shelter data simply isn't
+# there -- getattr(db, "shelter_points", None) is None, so
+# _shelter_preferred_targets() falls straight back to the full always-safe
+# set. The tests below add shelter data on top of that same fake and check
+# the preference (and its fallback) actually take effect.
+
+class FakeDBWithShelters(FakeDBWithHavens):
+    def __init__(self, *a, shelter_rows=None, nearest_shelter_row=None, **kw):
+        super().__init__(*a, **kw)
+        self.shelter_rows = shelter_rows or []
+        self.nearest_shelter_row = nearest_shelter_row
+        self.shelter_points_calls = 0
+        self.nearest_shelter_calls = []
+
+    def shelter_points(self, engine):
+        self.shelter_points_calls += 1
+        return self.shelter_rows
+
+    def nearest_shelter(self, engine, lat, lon, max_m):
+        self.nearest_shelter_calls.append((lat, lon, max_m))
+        return self.nearest_shelter_row
+
+
+def test_route_to_safety_prefers_a_haven_near_a_real_shelter(monkeypatch):
+    """Nodes 2 and 4 are both safe havens; node 2 is the NEARER of the two
+    (direct 100 m edge) but only node 4 has a real shelter on it. With
+    prefer_shelters=True (the default), the shelter-adjacent haven must
+    win even though it isn't the nearer of the two -- proving the
+    preference actually narrows the search rather than just annotating
+    whatever was already found."""
+    G = square_graph()
+    db_fake = FakeDBWithShelters(
+        {}, safe_nodes={2, 4},
+        shelter_rows=[{"shelter_id": 1, "name": "Cove Harbor Elementary",
+                       "kind": "school", "lat": 0.001, "lon": 0.001}],
+        nearest_shelter_row={"name": "Cove Harbor Elementary", "kind": "school",
+                             "distance_m": 0.0})
+    monkeypatch.setattr(routing, "db", db_fake)
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.nodes == [1, 2, 4]
+    assert res.used_shelter_preference is True
+    assert res.shelter_name == "Cove Harbor Elementary"
+    assert res.shelter_kind == "school"
+    assert db_fake.shelter_points_calls == 1
+
+    gj = R.safe_haven_geojson(res)
+    assert gj["properties"]["shelter_name"] == "Cove Harbor Elementary"
+    assert gj["properties"]["used_shelter_preference"] is True
+
+
+def test_route_to_safety_without_shelter_data_falls_back_to_nearest_dry_node(monkeypatch):
+    """Same two havens as above, but with plain FakeDBWithHavens (no
+    shelter_points at all) -- must reproduce the exact pre-Stage-11
+    answer: the nearer haven, no annotation."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes={2, 4}))
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.nodes == [1, 2]
+    assert res.used_shelter_preference is False
+    assert res.shelter_name is None
+    assert res.shelter_kind is None
+
+
+def test_route_to_safety_prefer_shelters_false_ignores_shelter_data(monkeypatch):
+    """Real shelter data is present, but the caller explicitly opted out --
+    must behave exactly like the no-shelter-data case, and must not even
+    query the shelter tables."""
+    G = square_graph()
+    db_fake = FakeDBWithShelters(
+        {}, safe_nodes={2, 4},
+        shelter_rows=[{"shelter_id": 1, "name": "Cove Harbor Elementary",
+                       "kind": "school", "lat": 0.001, "lon": 0.001}],
+        nearest_shelter_row={"name": "Cove Harbor Elementary", "kind": "school",
+                             "distance_m": 0.0})
+    monkeypatch.setattr(routing, "db", db_fake)
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0, prefer_shelters=False)
+    assert res.nodes == [1, 2]
+    assert res.used_shelter_preference is False
+    assert res.shelter_name is None
+    assert db_fake.shelter_points_calls == 0
+    assert db_fake.nearest_shelter_calls == []
+
+
+def test_route_to_safety_falls_back_when_no_shelter_is_near_any_safe_node(monkeypatch):
+    """A shelter exists in the data, but it snaps to a node that
+    always_safe_nodes() does NOT confirm is safe -- the intersection is
+    empty, so this must still succeed via the old 'any dry street'
+    behavior rather than reporting no haven at all."""
+    G = square_graph()
+    db_fake = FakeDBWithShelters(
+        {}, safe_nodes={2},
+        shelter_rows=[{"shelter_id": 1, "name": "Far Shelter", "kind": "hospital",
+                       "lat": 0.001, "lon": 0.001}])   # snaps to node 4, which isn't safe
+    monkeypatch.setattr(routing, "db", db_fake)
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.nodes == [1, 2]
+    assert res.used_shelter_preference is False
+
+
+def test_route_to_safety_already_safe_origin_gets_shelter_annotation(monkeypatch):
+    G = square_graph()
+    db_fake = FakeDBWithShelters(
+        {}, safe_nodes={1},
+        shelter_rows=[{"shelter_id": 1, "name": "Origin Shelter", "kind": "community center",
+                       "lat": 0.0, "lon": 0.0}],
+        nearest_shelter_row={"name": "Origin Shelter", "kind": "community center",
+                             "distance_m": 0.0})
+    monkeypatch.setattr(routing, "db", db_fake)
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.already_safe is True
+    assert res.used_shelter_preference is True
+    assert res.shelter_name == "Origin Shelter"
+
+
+def test_shelter_preferred_targets_falls_back_on_db_error(monkeypatch):
+    class BoomDB(FakeDBWithHavens):
+        def shelter_points(self, engine):
+            raise RuntimeError("db exploded")
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", BoomDB({}, safe_nodes={2, 4}))
+    R = routing.Router(G, engine=object())
+    targets = {2, 4}
+    result, used = R._shelter_preferred_targets(targets, "adult")
+    assert result == targets
+    assert used is False
+
+
+def test_shelter_preferred_targets_empty_targets_short_circuits(monkeypatch):
+    """No always-safe nodes at all -- must not even bother calling
+    shelter_points()."""
+    class RecordingDB(FakeDBWithHavens):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls = 0
+
+        def shelter_points(self, engine):
+            self.calls += 1
+            return []
+
+    G = square_graph()
+    spy = RecordingDB({}, safe_nodes=set())
+    monkeypatch.setattr(routing, "db", spy)
+    R = routing.Router(G, engine=object())
+    result, used = R._shelter_preferred_targets(set(), "adult")
+    assert result == set() and used is False
+    assert spy.calls == 0
+
+
+def test_shelter_annotation_falls_back_on_db_error(monkeypatch):
+    class BoomDB(FakeDBWithHavens):
+        def nearest_shelter(self, engine, lat, lon, max_m):
+            raise RuntimeError("db exploded")
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", BoomDB({}, safe_nodes=set()))
+    R = routing.Router(G, engine=object())
+    name, kind = R._shelter_annotation(0.0, 0.0)
+    assert (name, kind) == (None, None)
+
+
+def test_shelter_annotation_none_when_db_lacks_nearest_shelter(monkeypatch):
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes=set()))
+    R = routing.Router(G, engine=object())
+    assert R._shelter_annotation(0.0, 0.0) == (None, None)
+
+
 def chain_graph():
     """Four nodes in a straight line (1-2-3-4, 100 m per leg), used to
     build a multi-stop trip where the GIVEN waypoint order forces

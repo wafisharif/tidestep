@@ -324,9 +324,15 @@ async function findSafety() {
     pointToLayer: (feat, latlng) => L.circleMarker(latlng, { radius: 8, color: '#e65100', fillOpacity: 0.9 }),
   }).addTo(map);
   const p = f.properties;
+  // Stage 11: when route_to_safety() found (or the origin already sits at)
+  // a real shelter building -- see tidestep/shelters.py -- name it instead
+  // of just reporting a bare distance/time.
+  const shelterNote = p.shelter_name
+    ? ` at <b>${p.shelter_name}</b>${p.shelter_kind ? ` (${p.shelter_kind})` : ''}`
+    : '';
   el.innerHTML = p.already_safe
-    ? `You're already somewhere that stays safe for the rest of the forecast window.`
-    : `Nearest safe place: <b>${(p.length_m / 1000).toFixed(2)} km</b> away, ~${p.travel_time_min} min.`;
+    ? `You're already somewhere that stays safe for the rest of the forecast window${shelterNote}.`
+    : `Nearest safe place${shelterNote}: <b>${(p.length_m / 1000).toFixed(2)} km</b> away, ~${p.travel_time_min} min.`;
 }
 $('findSafety').onclick = findSafety;
 

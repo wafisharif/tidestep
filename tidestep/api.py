@@ -28,10 +28,14 @@ POST /api/route/multi_stop              flood-avoiding route through an ordered 
                                          optimize_order=true additionally searches for the best
                                          order to visit the intermediate stops in, instead of the
                                          order given (Router.route_multi_stop_optimized)
-GET  /api/route/to_safety?olat&olon&profile&hour
+GET  /api/route/to_safety?olat&olon&profile&hour&prefer_shelters
                                          evacuation-style routing: nearest reachable point that
                                          stays flood-safe for the rest of the forecast window, no
-                                         destination required (Router.route_to_safety)
+                                         destination required. prefer_shelters (default true)
+                                         prefers a real shelter building (school, hospital,
+                                         fire/police station, community center) over an
+                                         arbitrary dry street when that data is loaded
+                                         (Router.route_to_safety, tidestep/shelters.py)
 GET  /api/network/chokepoints?profile=adult
                                          network-wide resilience analysis: which street
                                          segments are structural single points of failure
@@ -258,16 +262,23 @@ def post_route_multi_stop(req: MultiStopRequest):
 
 @app.get("/api/route/to_safety")
 def get_route_to_safety(olat: float, olon: float, profile: str = "adult",
-                        hour: int = Query(0, ge=0, le=config.MAX_HOUR)):
+                        hour: int = Query(0, ge=0, le=config.MAX_HOUR),
+                        prefer_shelters: bool = True):
     """Evacuation-style routing: given only a starting point (no
     destination), find the nearest reachable point that stays flood-safe
     for ``profile`` across the rest of the forecast window and route
     there. Every other routing endpoint needs a destination the traveler
     already has in mind; this answers "where can I go that's safe" for
-    someone who doesn't (see Router.route_to_safety)."""
+    someone who doesn't (see Router.route_to_safety).
+
+    ``prefer_shelters`` (default true, Stage 11): prefer a haven near a
+    real shelter building (school, hospital, fire/police station,
+    community center -- tidestep/shelters.py) over an arbitrary dry
+    street, whenever that data has been loaded. Silently has no effect if
+    it hasn't -- see Router._shelter_preferred_targets()."""
     if profile not in hazard.PROFILES:
         raise HTTPException(400, f"profile must be one of {hazard.PROFILES}")
-    res = router().route_to_safety((olat, olon), profile, hour)
+    res = router().route_to_safety((olat, olon), profile, hour, prefer_shelters=prefer_shelters)
     if res is None:
         return JSONResponse({"type": "Feature", "geometry": None,
                              "properties": {"error": "no reachable safe haven found "

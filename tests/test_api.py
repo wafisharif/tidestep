@@ -211,6 +211,16 @@ def test_route_to_safety_valid_request_reaches_the_router(client):
         client.get("/api/route/to_safety", params=dict(olat=40.80, olon=-73.71, profile="adult"))
 
 
+def test_route_to_safety_accepts_prefer_shelters_query_param(client):
+    """Stage 11's prefer_shelters flag must be accepted (default true, and
+    an explicit false) and still reach the router -- FastAPI query-param
+    parsing failing here would show up as a 422 instead of our "no DB"
+    AssertionError guard."""
+    with pytest.raises(AssertionError):
+        client.get("/api/route/to_safety", params=dict(
+            olat=40.80, olon=-73.71, profile="adult", prefer_shelters=False))
+
+
 def test_multi_stop_optimize_order_rejects_unknown_profile_before_touching_the_database(client):
     r = client.post("/api/route/multi_stop", json={
         "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70}],

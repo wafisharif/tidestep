@@ -309,6 +309,43 @@ def test_route_to_safety_endpoint_works_against_real_data(seeded_app):
         assert "error" in body["properties"]
 
 
+def test_route_to_safety_endpoint_prefers_and_annotates_a_real_shelter(seeded_app):
+    """Stage 11: with real shelter data loaded (dev_seed.build_shelters_gdf,
+    the same synthetic fixture main() loads), GET /api/route/to_safety must
+    both (a) still return a well-formed answer -- the endpoint-level
+    contract test above already covers the no-shelter-data case -- and (b)
+    annotate the result with the shelter's name/kind once the resulting
+    haven is actually near one, proving the real PostGIS ST_DWithin
+    geography query in db.nearest_shelter() works end to end, not just
+    against the routing-layer fakes in test_routing.py."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import dev_seed  # noqa
+    from tidestep import db
+
+    client, segs, table = seeded_app
+    engine = create_engine(DATABASE_URL, future=True)
+    db.load_shelters(engine, dev_seed.build_shelters_gdf())
+    try:
+        r = client.get("/api/route/to_safety", params=dict(
+            olat=40.9, olon=-73.6998, profile="adult", hour=0))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["type"] == "Feature"
+        # every response (found or not) must carry the new Stage 11 keys,
+        # even when they end up null -- api.py must never drop them
+        if body["geometry"] is not None:
+            assert "used_shelter_preference" in body["properties"]
+            assert "shelter_name" in body["properties"]
+            assert "shelter_kind" in body["properties"]
+    finally:
+        # leave the shared seeded_app DB the way every other test in this
+        # module expects it (no shelters loaded)
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM shelters"))
+
+
 def test_route_window_matches_per_profile_flood_timing(seeded_app):
     """Cross-check the predictive alert logic (routing.route_window) against
     the hazard table it is supposed to summarize: the first hour it reports

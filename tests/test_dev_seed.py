@@ -57,6 +57,24 @@ def test_write_demo_graph_backs_up_an_existing_real_graph_instead_of_deleting_it
     assert graph_path.exists()   # now the synthetic graph, not gone
 
 
+def test_build_shelters_gdf_places_a_shelter_on_a_real_dry_node():
+    """Stage 11's synthetic shelter fixture: the school must sit exactly on
+    node 6's coordinates (Basin Rd's inland end, kept dry all 24 hours by
+    build_dem()/synthetic_tide()) so route_to_safety() has something real
+    to prefer offline, and the two fixture rows must carry the columns
+    db.load_shelters() expects (osmid, name, kind, geometry)."""
+    gdf = dev_seed.build_shelters_gdf()
+    assert len(gdf) == 2
+    assert set(gdf.columns) >= {"osmid", "name", "kind", "geometry"}
+    assert set(gdf["kind"]) == {"school", "community center"}
+
+    G = dev_seed.build_graph()
+    node6_lon, node6_lat = G.nodes[6]["x"], G.nodes[6]["y"]
+    school = gdf[gdf["kind"] == "school"].iloc[0]
+    assert school.geometry.x == pytest.approx(node6_lon)
+    assert school.geometry.y == pytest.approx(node6_lat)
+
+
 def test_write_demo_graph_never_overwrites_an_existing_backup(tmp_path):
     graph_path = tmp_path / "streets.graphml"
     backup = graph_path.with_suffix(".graphml.real-backup")
