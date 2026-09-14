@@ -96,3 +96,17 @@ def test_find_chokepoints_rejects_unknown_profile_before_touching_the_database()
     G = dumbbell_graph()
     with pytest.raises(ValueError):
         resilience.find_chokepoints(G, engine=object(), profile="bogus")
+
+
+def test_topology_empty_graph_with_no_usable_edges_returns_no_chokepoints():
+    """_chokepoint_topology's own early return (S.number_of_nodes() == 0)
+    for a graph where nothing at all survives the edge_allowed filter --
+    distinct from test_no_chokepoints_in_a_fully_connected_ring, which has
+    real usable edges but zero bridges among them. Here self-loops (the
+    `u == v` skip) are the only edges present, so pair_keys stays empty and
+    S never gets a single node added."""
+    G = nx.MultiDiGraph()
+    G.add_node(1, x=0.0, y=0.0)
+    G.add_node(2, x=0.0, y=0.0)
+    G.add_edge(1, 1, key=0, highway="residential")   # self-loop, skipped by u == v
+    assert resilience._chokepoint_topology(G, "adult") == []

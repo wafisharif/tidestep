@@ -4,8 +4,11 @@ the segment_edges table shape. No network, no DEM needed."""
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import geopandas as gpd
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 from shapely.geometry import LineString
 
 from tidestep import segments
@@ -98,3 +101,58 @@ def test_segment_edges_handles_multiple_edges_independently():
         assert idx == list(range(len(idx)))
     # segment_id is globally unique and sequential across both edges
     assert list(segs["segment_id"]) == list(range(len(segs)))
+
+
+def _tiny_dem(tmp_path):
+    """A small DEM covering roughly lon [-73.711, -73.709], lat [40.799,
+    40.801] -- test_floodmodel.py's end-to-end test only ever samples
+    segments that fall INSIDE a DEM this size; nothing there exercises a
+    segment entirely outside it."""
+    dem = np.full((20, 20), 1.0, dtype="float32")
+    tr = from_origin(-73.711, 40.801, 1e-4, 1e-4)
+    path = tmp_path / "small_dem.tif"
+    with rasterio.open(path, "w", driver="GTiff", height=20, width=20, count=1,
+                       dtype="float32", crs="EPSG:4326", transform=tr, nodata=-9999) as dst:
+        dst.write(dem, 1)
+    return path
+
+
+def test_sample_min_elevation_returns_nan_ground_for_a_segment_entirely_off_dem(tmp_path):
+    """A road segment far outside the cached DEM tile's extent (documented
+    in sample_min_elevation's own docstring: 'ground_m is NaN if the
+    segment is off-DEM') -- this exact case had never been exercised: the
+    only existing caller (test_floodmodel.py) only ever samples segments
+    that fall inside the DEM. Must degrade to NaN, not raise an index
+    error from rowcol() landing outside the raster."""
+    dem_path = _tiny_dem(tmp_path)
+    # a road several degrees away from the tiny DEM's ~0.002 deg extent
+    far_away = LineString([(10.0, 10.0), (10.001, 10.0)])
+    segs = gpd.GeoDataFrame({"geometry": [far_away]}, crs=4326)
+    out = segments.sample_min_elevation(segs, dem_path)
+    assert len(out) == 1
+    # column-first indexing keeps ground_m's own float64 dtype -- .iloc[0]
+    # on the whole row upcasts across the mixed float64/Int64(min_row,
+    # min_col) columns and turns NaN into pandas' NA, which np.isnan()
+    # can't evaluate
+    assert np.isnan(out["ground_m"].iloc[0])
+    assert out["min_row"].iloc[0] is pd.NA
+    assert out["min_col"].iloc[0] is pd.NA
+
+
+def test_sample_min_elevation_finds_the_real_minimum_for_an_on_dem_segment(tmp_path):
+    """Sanity check the same function's normal path with a controlled,
+    non-flat DEM (a two-value split, min on the left) so the picked
+    ground_m is provably the minimum sampled value, not just "some
+    finite number"."""
+    dem = np.full((20, 20), 5.0, dtype="float32")
+    dem[:, :10] = 0.5   # left half is lower
+    tr = from_origin(-73.711, 40.801, 1e-4, 1e-4)
+    path = tmp_path / "split_dem.tif"
+    with rasterio.open(path, "w", driver="GTiff", height=20, width=20, count=1,
+                       dtype="float32", crs="EPSG:4326", transform=tr, nodata=-9999) as dst:
+        dst.write(dem, 1)
+    # a road crossing the whole DEM west to east, so it samples both halves
+    road = LineString([(-73.7109, 40.8001), (-73.7091, 40.8001)])
+    segs = gpd.GeoDataFrame({"geometry": [road]}, crs=4326)
+    out = segments.sample_min_elevation(segs, path)
+    assert out.iloc[0]["ground_m"] == pytest.approx(0.5, abs=1e-3)

@@ -229,6 +229,44 @@ def test_route_time_aware_matches_departure_hour_route_for_short_trips(monkeypat
     assert aware.arrival_hour == aware.departure_hour == 0
 
 
+def diamond_time_graph():
+    """S -> A direct (very long) vs S -> B -> A (much shorter), then A -> T
+    (long enough that S -> A's stale, longer-distance heap entry is still
+    sitting in the priority queue when it's eventually popped) -- the one
+    graph shape that can make route_time_aware()'s hand-rolled Dijkstra
+    relax the same node twice before it's finalized, so the "if u in
+    visited: continue" stale-pop guard actually fires instead of every
+    node only ever being popped once."""
+    G = nx.MultiDiGraph(crs="EPSG:4326")
+    pts = {1: (0, 0), 2: (0.0003, 0), 3: (0.0006, 0), 4: (0.0009, 0)}
+    for n, (x, y) in pts.items():
+        G.add_node(n, x=x, y=y)
+    def add(u, v, L):
+        G.add_edge(u, v, key=0, length=L, highway="residential")
+        G.add_edge(v, u, key=0, length=L, highway="residential")
+    add(1, 3, 1000)   # S -> A, direct but long
+    add(1, 2, 10)     # S -> B, short
+    add(2, 3, 10)     # B -> A, short: real S->A distance is 20, not 1000
+    add(3, 4, 2000)   # A -> T, long enough that the stale (S->A direct)
+                       # entry surfaces from the heap before T does
+    return G
+
+
+def test_route_time_aware_stale_heap_entry_for_an_already_visited_node_is_skipped(monkeypatch):
+    """A really is discovered twice (once via the long direct edge from S,
+    once -- cheaper -- via the S->B->A detour) before it's ever popped, so
+    the heap still holds the earlier, worse entry for A when the search
+    later pops it again. Confirms that stale pop is silently skipped
+    rather than re-processed (which would at best waste work and at worst
+    overwrite an already-correct prev[] pointer)."""
+    G = diamond_time_graph()
+    monkeypatch.setattr(routing, "db", FakeDB(set()))
+    R = routing.Router(G, engine=object())
+    res = R.route_time_aware((0, 0), (0, 0.0009), "adult", 0)
+    assert res.nodes == [1, 2, 3, 4]              # took the short detour via B, not the direct edge
+    assert res.length_m == 10 + 10 + 2000
+
+
 def test_route_time_aware_no_path_returns_none(monkeypatch):
     G = nx.MultiDiGraph(crs="EPSG:4326")
     G.add_node(1, x=0, y=0); G.add_node(2, x=1, y=1)  # disconnected
@@ -367,6 +405,25 @@ def test_time_aware_route_geojson_shape(monkeypatch):
     assert gj["properties"]["time_aware"] is True
     assert gj["properties"]["arrival_hour"] == 0
     assert gj["properties"]["hour_crossed"] is False
+
+
+def test_route_geojson_shape(monkeypatch):
+    """route_geojson() (the plain, non-time-aware route()'s GeoJSON output,
+    used by the /api/route endpoint) had never been called by any test --
+    every other geojson test here covers time_aware_route_geojson or
+    multi_stop_route_geojson instead."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDB({(1, 2, 0), (2, 1, 0)}))
+    R = routing.Router(G, engine=object())
+    res = R.route((0, 0), (0, 0.001), "adult", 0)
+    gj = R.route_geojson(res)
+    assert gj["type"] == "Feature"
+    assert gj["geometry"]["type"] == "LineString"
+    assert gj["geometry"]["coordinates"][0] == [0, 0]        # [lon, lat] for node 1
+    assert gj["properties"]["length_m"] == round(res.length_m, 1)
+    assert gj["properties"]["baseline_length_m"] == round(res.baseline_length_m, 1)
+    assert gj["properties"]["baseline_blocked"] is True     # the direct edge is flooded
+    assert gj["properties"]["avoided_edges"] == res.avoided_edges
 
 
 def test_route_advisory_reports_safe_and_unsafe_hours(monkeypatch):
@@ -625,6 +682,35 @@ def test_route_to_safety_returns_none_if_haven_unreachable(monkeypatch):
     assert R.route_to_safety((0, 0), "adult", 0) is None
 
 
+def test_route_to_safety_skips_unsafe_edges_while_searching(monkeypatch):
+    """route_to_safety() hand-rolls its own search loop (a multi-target
+    Dijkstra -- see its docstring) rather than reusing route_time_aware()'s,
+    so it has its own separate copy of the "skip an edge that's unsafe or
+    not usable by this profile" guard, never exercised for THIS loop by any
+    existing test (they all pass unsafe_by_hour={})."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({0: {(1, 2, 0), (2, 1, 0)}}, safe_nodes={4}))
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.nodes == [1, 3, 4]     # detours around the unsafe direct 1->2 edge
+    assert res.length_m == 220
+
+
+def test_route_to_safety_stale_heap_entry_for_an_already_visited_node_is_skipped(monkeypatch):
+    """Same stale-heap-pop shape as
+    test_route_time_aware_stale_heap_entry_for_an_already_visited_node_is_skipped,
+    but for route_to_safety()'s own separately hand-rolled search loop --
+    it stops at the first known-safe node reached rather than one fixed
+    destination, so it needed its own diamond-shaped proof that a node
+    relaxed twice before being finalized doesn't get double-processed."""
+    G = diamond_time_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithHavens({}, safe_nodes={4}))
+    R = routing.Router(G, engine=object())
+    res = R.route_to_safety((0, 0), "adult", 0)
+    assert res.nodes == [1, 2, 3, 4]        # took the short detour via B, not the direct edge
+    assert res.length_m == 10 + 10 + 2000
+
+
 def test_route_to_safety_queries_havens_from_departure_hour_onward(monkeypatch):
     """always_safe_nodes() must be asked about the window starting at the
     REQUESTED departure hour through the forecast horizon -- not the
@@ -788,6 +874,42 @@ def test_shelter_preferred_targets_falls_back_on_db_error(monkeypatch):
     assert used is False
 
 
+def test_shelter_preferred_targets_falls_back_when_no_shelters_exist_at_all(monkeypatch):
+    """shelter_points() itself succeeds but returns an empty table -- the
+    project has never loaded any shelter data yet, a distinct case from
+    the DB-error and empty-targets fallbacks above."""
+    G = square_graph()
+    monkeypatch.setattr(routing, "db", FakeDBWithShelters({}, safe_nodes={2, 4}, shelter_rows=[]))
+    R = routing.Router(G, engine=object())
+    targets = {2, 4}
+    result, used = R._shelter_preferred_targets(targets, "adult")
+    assert result == targets
+    assert used is False
+
+
+def test_shelter_preferred_targets_falls_back_when_nearest_nodes_raises(monkeypatch):
+    """Real shelter rows exist, but snapping them onto the graph
+    (ox.nearest_nodes) blows up -- e.g. a malformed lat/lon in the table,
+    or osmnx/scikit-learn raising on a degenerate input. Must degrade to
+    the old "any dry street" behavior rather than propagate the error out
+    of route_to_safety()."""
+    G = square_graph()
+    db_fake = FakeDBWithShelters(
+        {}, safe_nodes={2, 4},
+        shelter_rows=[{"shelter_id": 1, "name": "Bad Row", "kind": "school",
+                       "lat": 0.001, "lon": 0.001}])
+    monkeypatch.setattr(routing, "db", db_fake)
+    R = routing.Router(G, engine=object())
+
+    def boom(*a, **k):
+        raise RuntimeError("nearest_nodes exploded")
+    monkeypatch.setattr(routing.ox, "nearest_nodes", boom)
+    targets = {2, 4}
+    result, used = R._shelter_preferred_targets(targets, "adult")
+    assert result == targets
+    assert used is False
+
+
 def test_shelter_preferred_targets_empty_targets_short_circuits(monkeypatch):
     """No always-safe nodes at all -- must not even bother calling
     shelter_points()."""
@@ -885,6 +1007,16 @@ def test_route_multi_stop_optimized_rejects_too_many_stops():
     waypoints = [(0, 0)] * 9   # 7 intermediate stops, one over MAX_OPTIMIZE_STOPS
     with pytest.raises(ValueError):
         R.route_multi_stop_optimized(waypoints, "adult", 0)
+
+
+def test_route_multi_stop_optimized_rejects_fewer_than_two_waypoints():
+    """A single waypoint has no "origin + destination" to route between at
+    all -- the other rejection above (too many stops) is checked one line
+    later and never exercises this earlier, separate guard."""
+    G = chain_graph()
+    R = routing.Router(G, engine=object())
+    with pytest.raises(ValueError, match="at least 2 waypoints"):
+        R.route_multi_stop_optimized([(0, 0)], "adult", 0)
 
 
 def test_route_multi_stop_optimized_falls_back_to_given_order_when_nothing_completes(monkeypatch):

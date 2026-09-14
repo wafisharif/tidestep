@@ -99,6 +99,57 @@ def test_export_tile_rejects_a_non_tiff_response(tmp_path, monkeypatch):
         dem._export_tile((40.80, -73.71, 40.81, -73.70), 10, 10, tmp_path / "bad.tif")
 
 
+def test_export_tile_writes_content_and_returns_path_on_a_real_tiff_response(tmp_path, monkeypatch):
+    """The success path within the retry loop (write the response bytes,
+    return out) -- every other test either monkeypatches _export_tile out
+    entirely (the fetch_dem tests above) or only exercises the FAILURE
+    path (the non-TIFF-response test above). Never directly confirmed the
+    happy path actually writes the real bytes it received."""
+    tiff_bytes = b"II*\x00" + b"\x00" * 40   # real little-endian TIFF magic + filler
+
+    class FakeResp:
+        status_code = 200
+        content = tiff_bytes
+        text = ""
+        def raise_for_status(self):
+            pass
+    monkeypatch.setattr(dem.requests, "get", lambda *a, **k: FakeResp())
+    out_path = tmp_path / "tile.tif"
+    result = dem._export_tile((40.80, -73.71, 40.81, -73.70), 10, 10, out_path)
+    assert result == out_path
+    assert out_path.read_bytes() == tiff_bytes
+
+
+def test_export_tile_retries_then_succeeds_after_transient_failures(tmp_path, monkeypatch):
+    """3DEP's ImageServer returns sporadic 500s (docs/PIPELINE.md, the
+    'dem: smaller 3DEP tiles with retries' fix) -- confirm the retry loop
+    actually recovers within its 4-attempt budget instead of only ever
+    being tested via total exhaustion (the non-TIFF test) or total
+    success (the test above)."""
+    tiff_bytes = b"MM\x00*" + b"\x00" * 40   # real big-endian TIFF magic
+    calls = []
+
+    class FlakyThenGoodResp:
+        def __init__(self, ok):
+            self.ok = ok
+            self.content = tiff_bytes if ok else b"<html>server error</html>"
+            self.text = "" if ok else "<html>server error</html>"
+        def raise_for_status(self):
+            pass
+
+    def fake_get(*a, **k):
+        calls.append(1)
+        return FlakyThenGoodResp(ok=len(calls) >= 3)   # fails twice, succeeds on the 3rd
+    monkeypatch.setattr(dem.requests, "get", fake_get)
+    monkeypatch.setattr(dem.time, "sleep", lambda *_: None)   # skip the real backoff delay
+
+    out_path = tmp_path / "tile.tif"
+    result = dem._export_tile((40.80, -73.71, 40.81, -73.70), 10, 10, out_path)
+    assert result == out_path
+    assert len(calls) == 3
+    assert out_path.read_bytes() == tiff_bytes
+
+
 def test_load_dem_converts_nodata_to_nan(tmp_path):
     path = tmp_path / "small.tif"
     arr = np.array([[1.0, 2.0], [-9999.0, 4.0]], dtype="float32")
