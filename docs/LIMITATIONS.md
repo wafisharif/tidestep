@@ -156,9 +156,21 @@ notice. Each one is also called out in the module it applies to.
 - **MVP router is a full graph recompute per query** (networkx Dijkstra
   for the plain router; a hand-rolled Dijkstra over `(elapsed_time, node)`
   state for the time-aware router, run up to once per forecast hour for
-  `route_best_departure()`), which is fine at this bbox's scale but would
-  not scale city-wide without moving to something like OSRM with hourly
-  traffic-speed-file swaps.
+  `route_best_departure()`, or once per candidate visiting-order
+  permutation for `route_multi_stop_optimized()`), which is fine at this
+  bbox's scale but would not scale city-wide without moving to something
+  like OSRM with hourly traffic-speed-file swaps. What IS shared across
+  those repeated searches, as of this pass: the per-hour hazard data
+  itself (`db.unsafe_edges`/`db.edge_hazard`) is fetched from Postgres at
+  most once per (hour, profile) actually needed across the whole call —
+  `route_time_aware()`'s optional `_cache` argument, threaded through by
+  `route_best_departure()` across its hours loop and by
+  `route_multi_stop_optimized()` across every permutation it tries
+  (up to 720 at `MAX_OPTIMIZE_STOPS=6`) — rather than being re-queried by
+  every individual search that happens to touch the same hour. This
+  removes redundant DB round-trips; it does not remove the repeated
+  shortest-path searches themselves, which is the part that would need a
+  different algorithm (not just caching) to scale further.
 - **`GET /api/network/chokepoints`'s "single point of failure" is purely
   topological** (`tidestep/resilience.py`) — it only knows about the
   streets present in the OSM graph this app loaded. It has no concept of

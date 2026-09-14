@@ -256,3 +256,41 @@ def test_multi_stop_without_optimize_order_is_unaffected(client):
         client.post("/api/route/multi_stop", json={
             "waypoints": [{"lat": 40.80, "lon": -73.71}, {"lat": 40.81, "lon": -73.70}],
             "profile": "adult"})
+
+
+# --- GET /api/network/chokepoints -----------------------------------------
+# Every other endpoint above has both a "rejects unknown profile before
+# touching the database" test and a "valid request reaches the router"
+# test -- this endpoint (added for the network-wide resilience analysis
+# feature) had neither, found by re-checking test_api.py against api.py
+# endpoint-by-endpoint. resilience.find_chokepoints() itself already has
+# its own profile-validation test (test_resilience.py), but that doesn't
+# prove api.py's OWN pre-check (the one that turns a bad profile into a
+# clean 400 instead of resilience.py's ValueError leaking out as a 500)
+# is actually wired up and reached first, which is exactly what every
+# sibling endpoint's test in this file exists to prove for its own route.
+
+def test_chokepoints_rejects_unknown_profile_before_touching_the_database(client):
+    r = client.get("/api/network/chokepoints", params={"profile": "dog"})
+    assert r.status_code == 400
+    assert "profile" in r.json()["detail"]
+
+
+def test_chokepoints_valid_request_reaches_the_router(client):
+    """A valid profile passes api.py's own validation and reaches
+    router() (which then raises via the no-DB fixture) -- proving the
+    endpoint's profile check doesn't accidentally reject every request,
+    and that it really does call through to router()/engine() rather
+    than, say, silently returning an empty result."""
+    with pytest.raises(AssertionError):
+        client.get("/api/network/chokepoints", params={"profile": "adult"})
+
+
+def test_chokepoints_defaults_to_adult_profile(client):
+    """profile is optional (default "adult") -- confirm the default is
+    itself a valid profile that reaches the router, not accidentally
+    something hazard.PROFILES would reject if it were ever passed
+    explicitly (would show up as an unexpected 400 instead of the no-DB
+    AssertionError)."""
+    with pytest.raises(AssertionError):
+        client.get("/api/network/chokepoints")

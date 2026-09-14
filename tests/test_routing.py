@@ -119,6 +119,38 @@ def test_highway_set_handles_list_valued_tags():
     assert routing.edge_allowed("child", all_non_drivable) is True
 
 
+def test_edge_time_s_vehicle_uses_osmnx_travel_time():
+    R = routing.Router(square_graph(), engine=object())
+    assert R._edge_time_s({"length": 300, "travel_time": 45.0}, "vehicle_small") == 45.0
+
+
+def test_edge_time_s_vehicle_falls_back_when_travel_time_missing():
+    """osmnx's ox.add_edge_travel_times() can't assign a speed to every
+    edge (e.g. a highway type missing from its speed-limit table) -- a
+    documented, previously-untested fallback (see _edge_time_s's
+    docstring): a conservative 30 km/h residential-street assumption,
+    rather than crashing or silently returning 0 (which would make the
+    edge look free to cross, wrongly winning every shortest-path
+    comparison against real-travel-time edges)."""
+    R = routing.Router(square_graph(), engine=object())
+    t = R._edge_time_s({"length": 300}, "vehicle_small")   # no travel_time key at all
+    assert t == pytest.approx(300 / (30 / 3.6))   # 36.0s
+    # also covers travel_time explicitly present but None (some osmnx
+    # versions leave the key with a None value rather than omitting it)
+    assert R._edge_time_s({"length": 300, "travel_time": None}, "vehicle_large") == \
+        pytest.approx(300 / (30 / 3.6))
+
+
+def test_edge_time_s_pedestrian_ignores_travel_time():
+    """A pedestrian profile must use config.WALK_SPEED_MPS, never osmnx's
+    vehicle travel_time, even if the edge happens to carry one (e.g. a
+    shared-use road segment also present in the vehicle graph)."""
+    from tidestep import config
+    R = routing.Router(square_graph(), engine=object())
+    t = R._edge_time_s({"length": 140, "travel_time": 1.0}, "child")
+    assert t == pytest.approx(140 / config.WALK_SPEED_MPS["child"])
+
+
 def test_route_window_no_path_at_all(monkeypatch):
     """A profile with no possible path (flooding aside) is reported unsafe
     from hour 0, not silently treated as 'always safe'."""
@@ -236,6 +268,92 @@ def test_route_time_aware_caps_hour_at_forecast_horizon(monkeypatch):
     assert res is not None
     assert res.departure_hour == config.MAX_HOUR
     assert res.arrival_hour == config.MAX_HOUR
+
+
+class CountingDB(FakeDBByHour):
+    """Like FakeDBByHour, but records every (hour) it was actually asked
+    about -- for proving the ``_cache`` sharing added to route_time_aware()/
+    route_best_departure()/route_multi_stop_optimized() really does collapse
+    repeat lookups of the same hour into one DB call, not just that the
+    routes it returns are still correct (already covered by every other
+    test in this file, which keep passing unchanged after that change)."""
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.unsafe_calls: list[int] = []
+        self.hazard_calls: list[int] = []
+
+    def unsafe_edges(self, engine, hour, profile):
+        self.unsafe_calls.append(hour)
+        return super().unsafe_edges(engine, hour, profile)
+
+    def edge_hazard(self, engine, hour):
+        self.hazard_calls.append(hour)
+        return super().edge_hazard(engine, hour)
+
+
+def test_route_time_aware_shares_hazard_cache_across_calls(monkeypatch):
+    """The mechanism itself: two route_time_aware() calls for the same hour
+    sharing one ``_cache`` dict hit the DB once between them; without a
+    shared cache (the default, and the pre-existing behavior) they hit it
+    once each."""
+    G = square_graph()
+    spy = CountingDB({})
+    monkeypatch.setattr(routing, "db", spy)
+    R = routing.Router(G, engine=object())
+
+    cache: dict = {}
+    R.route_time_aware((0, 0), (0, 0.001), "adult", 0, _cache=cache)
+    R.route_time_aware((0, 0), (0, 0.001), "adult", 0, _cache=cache)
+    assert spy.unsafe_calls == [0]     # second call reused the cached hour-0 data
+    assert spy.hazard_calls == [0]
+
+    spy2 = CountingDB({})
+    monkeypatch.setattr(routing, "db", spy2)
+    R.route_time_aware((0, 0), (0, 0.001), "adult", 0)
+    R.route_time_aware((0, 0), (0, 0.001), "adult", 0)
+    assert spy2.unsafe_calls == [0, 0]   # no shared cache (the default) -> queried twice
+    assert spy2.hazard_calls == [0, 0]
+
+
+def test_route_best_departure_reuses_overlapping_hour_data(monkeypatch):
+    """On this slow long_detour_graph trip, departing at hour 0 needs hours
+    {0, 1} (the ~64-minute first leg crosses the boundary) and departing at
+    hour 1 needs hours {1, 2} -- hour 1 is genuinely needed by both
+    top-level calls. route_best_departure() must fetch it only once."""
+    G = long_detour_graph()
+    spy = CountingDB({})   # every hour reports "nothing unsafe" -> shortest (direct) path wins
+    monkeypatch.setattr(routing, "db", spy)
+    R = routing.Router(G, engine=object())
+
+    plan = R.route_best_departure((0, 0), (0, 0.011), "adult", range(2))
+    assert plan.hours[0].safe and plan.hours[1].safe
+    # hour 1 appears in both departure hours' searches but must be fetched
+    # only once each for unsafe_edges and edge_hazard -- were sharing not
+    # wired up, this would be [0, 1, 1, 2] instead.
+    assert spy.unsafe_calls == [0, 1, 2]
+    assert spy.hazard_calls == [0, 1, 2]
+
+
+def test_route_multi_stop_optimized_reuses_hazard_data_across_permutations(monkeypatch):
+    """Every permuted visiting order's first leg departs at the SAME hour
+    (the trip's overall departure_hour, elapsed=0) -- so without
+    cross-permutation sharing, that hour gets re-fetched once per order
+    tried (here: twice, one per permutation of 2 intermediate stops) even
+    though it is exactly the same DB row every time."""
+    G = square_graph()
+    spy = CountingDB({})   # nothing unsafe anywhere -> every order's every leg succeeds
+    monkeypatch.setattr(routing, "db", spy)
+    R = routing.Router(G, engine=object())
+
+    waypoints = [(0, 0), (0, 0.001), (0.001, 0), (0.001, 0.001)]  # nodes 1, 2, 3, 4
+    plan = R.route_multi_stop_optimized(waypoints, "adult", 0)
+    assert plan.orders_tried == 2   # 2! orders of the 2 intermediate stops
+    assert plan.orders_complete == 2
+    # this whole trip (every leg, every permutation) never crosses an hour
+    # boundary -- only hour 0 is ever relevant, and it must be fetched once,
+    # not once per leg per permutation (which would be 6: 3 legs x 2 orders).
+    assert spy.unsafe_calls == [0]
+    assert spy.hazard_calls == [0]
 
 
 def test_time_aware_route_geojson_shape(monkeypatch):

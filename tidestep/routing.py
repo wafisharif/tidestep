@@ -404,7 +404,8 @@ class Router:
         return length / config.WALK_SPEED_MPS[profile]
 
     def route_time_aware(self, origin: tuple[float, float], destination: tuple[float, float],
-                         profile: str, departure_hour: int) -> TimeAwareRouteResult | None:
+                         profile: str, departure_hour: int,
+                         _cache: dict | None = None) -> TimeAwareRouteResult | None:
         """Like route(), but hazard is checked at each edge's own arrival
         hour instead of once at the departure hour for the whole trip --
         retiring the MVP simplification stated in docs/PIPELINE.md Stage 6
@@ -421,16 +422,28 @@ class Router:
         hand-rolled Dijkstra over (elapsed_seconds, node) instead, using
         _edge_time_s as the edge weight and re-deriving the current hour
         from accumulated time at each pop.
+
+        ``_cache`` is an internal, optional {"unsafe": {}, "depth": {}}
+        dict a caller that makes MANY of these calls back-to-back (same
+        engine, same forecast) can pass in so hour-N hazard data already
+        fetched for one call is reused by the next instead of re-querying
+        the DB -- see route_best_departure() and route_multi_stop_optimized()
+        below, which is where this actually matters (up to 24 calls, or up
+        to 720 permutations x several legs, respectively). Left as None,
+        this method behaves exactly as before: a fresh, call-local cache
+        that only helps a single trip's own hour-crossing legs.
         """
         s, t = self.nearest(*origin, profile), self.nearest(*destination, profile)
         max_hour = config.MAX_HOUR
-        unsafe_cache: dict[int, set[tuple]] = {}
-        depth_cache: dict[int, dict[tuple, int]] = {}
+        cache = _cache if _cache is not None else {}
+        unsafe_cache: dict[tuple[int, str], set[tuple]] = cache.setdefault("unsafe", {})
+        depth_cache: dict[int, dict[tuple, int]] = cache.setdefault("depth", {})
 
         def unsafe_at(h: int) -> set[tuple]:
-            if h not in unsafe_cache:
-                unsafe_cache[h] = db.unsafe_edges(self.engine, h, profile)
-            return unsafe_cache[h]
+            key = (h, profile)
+            if key not in unsafe_cache:
+                unsafe_cache[key] = db.unsafe_edges(self.engine, h, profile)
+            return unsafe_cache[key]
 
         def depth_at(h: int) -> dict[tuple, int]:
             if h not in depth_cache:
@@ -519,6 +532,16 @@ class Router:
         as travel time advances the clock) -- fine at this bbox's scale,
         same tradeoff already accepted for route()/route_advisory() (see
         docs/LIMITATIONS.md's "full graph recompute per query" note).
+
+        The searches do share one hazard-lookup cache across the whole
+        ``hours`` loop (passed as route_time_aware()'s ``_cache``), so a
+        given (hour, profile) pair's unsafe-edge/depth data is fetched
+        from the DB at most once per route_best_departure() call, not once
+        per hour that happens to touch it -- adjacent candidate hours
+        whose trips are short relative to the bbox (the normal case here)
+        would otherwise re-fetch the same hour's hazard rows repeatedly.
+        This changes nothing about which hour is recommended or what each
+        hour reports; it only avoids redundant DB round-trips.
         """
         s, t = self.nearest(*origin, profile), self.nearest(*destination, profile)
         try:
@@ -531,8 +554,9 @@ class Router:
         recommended_hour = None
         recommended_length_m = None
         recommended_travel_time_min = None
+        hazard_cache: dict = {}
         for h in hours:
-            res = self.route_time_aware(origin, destination, profile, h)
+            res = self.route_time_aware(origin, destination, profile, h, _cache=hazard_cache)
             if res is None:
                 out.append(HourRoute(hour=h, safe=False, length_m=None,
                                      travel_time_min=None, max_depth_cm_on_route=None))
@@ -550,7 +574,7 @@ class Router:
                                  recommended_travel_time_min=recommended_travel_time_min)
 
     def route_multi_stop(self, waypoints: list[tuple[float, float]], profile: str,
-                         departure_hour: int) -> TripPlan:
+                         departure_hour: int, _cache: dict | None = None) -> TripPlan:
         """Chain route_time_aware() across an ordered list of 2+ waypoints
         -- an origin, one or more stops, and a final destination -- where
         each leg's departure hour is the PREVIOUS leg's actual arrival
@@ -573,15 +597,24 @@ class Router:
         so a multi-stop trip's correctness rests on the same
         already-tested arrival-hour logic as every other time-aware
         feature, rather than a new implementation of it.
+
+        ``_cache`` (see route_time_aware()'s docstring) defaults to None,
+        meaning a fresh hazard-lookup cache local to this one call -- a
+        single trip's own legs still share hazard data with each other
+        exactly as before. route_multi_stop_optimized() below passes in
+        ONE cache shared across every permutation it tries, since the
+        same (hour, profile) hazard data is otherwise re-fetched once per
+        permutation.
         """
         if len(waypoints) < 2:
             raise ValueError("route_multi_stop needs at least 2 waypoints (origin + destination)")
 
+        cache = _cache if _cache is not None else {}
         legs: list[TripLeg] = []
         hour = departure_hour
         max_depth = 0
         for i in range(len(waypoints) - 1):
-            res = self.route_time_aware(waypoints[i], waypoints[i + 1], profile, hour)
+            res = self.route_time_aware(waypoints[i], waypoints[i + 1], profile, hour, _cache=cache)
             if res is None:
                 return TripPlan(legs=legs, blocked_leg_index=i, total_length_m=None,
                                 total_travel_time_min=None, departure_hour=departure_hour,
@@ -668,6 +701,17 @@ class Router:
         guessing: picking "the order that gets furthest before blocking"
         would need its own scoring rule for partial trips, and isn't
         obviously better than just preserving what the caller asked for.
+
+        Every permutation tried shares ONE hazard-lookup cache (see
+        route_time_aware()'s ``_cache``): different visiting orders reuse
+        the same waypoints, so the same (hour, profile) unsafe-edge/depth
+        data would otherwise be re-fetched from the DB independently for
+        every one of up to 720 permutations (MAX_OPTIMIZE_STOPS=6, 6!)
+        instead of once. This is the search this backlog item ("push the
+        per-hour hazard lookups down") actually pays off the most for --
+        route_best_departure() has at most 24 candidate hours, this has
+        up to 720 candidate orders. Sharing the cache changes nothing
+        about which order wins; it only removes redundant DB round-trips.
         """
         if len(waypoints) < 2:
             raise ValueError("route_multi_stop_optimized needs at least 2 waypoints "
@@ -679,11 +723,12 @@ class Router:
                 f"({n_intermediate} given) -- brute-forcing every order stops being "
                 f"cheap past that")
 
+        hazard_cache: dict = {}
         identity_order = list(range(len(waypoints)))
         if n_intermediate <= 1:
             # 0 or 1 intermediate stop: only one possible visiting order,
             # nothing to search for.
-            plan = self.route_multi_stop(waypoints, profile, departure_hour)
+            plan = self.route_multi_stop(waypoints, profile, departure_hour, _cache=hazard_cache)
             complete = 1 if plan.blocked_leg_index is None else 0
             return OptimizedTripPlan(plan=plan, order=identity_order, optimized=False,
                                      orders_tried=1, orders_complete=complete)
@@ -695,7 +740,7 @@ class Router:
         for perm in itertools.permutations(middle):
             order = [0, *perm, len(waypoints) - 1]
             pts = [waypoints[i] for i in order]
-            plan = self.route_multi_stop(pts, profile, departure_hour)
+            plan = self.route_multi_stop(pts, profile, departure_hour, _cache=hazard_cache)
             orders_tried += 1
             if plan.blocked_leg_index is not None:
                 continue
@@ -705,7 +750,7 @@ class Router:
                 best = (plan.total_travel_time_min, plan.total_length_m, order, plan)
 
         if best is None:
-            fallback = self.route_multi_stop(waypoints, profile, departure_hour)
+            fallback = self.route_multi_stop(waypoints, profile, departure_hour, _cache=hazard_cache)
             return OptimizedTripPlan(plan=fallback, order=identity_order, optimized=False,
                                      orders_tried=orders_tried, orders_complete=0)
 

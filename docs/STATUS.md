@@ -2,6 +2,125 @@
 
 Updated: 2026-09-13
 
+## Done (2026-09-13, thirteenth pass — confirmed the last two passes are
+live, closed out the routing-performance backlog item, and found two real
+historical dates for a genuine Stage 9 sensitivity check)
+
+**First, verification, not assumption.** `git fetch origin` confirmed
+`origin/main` is now at `af14c59` (the Stage 9 validation-metric fix) on
+top of `3ae6433` (the shelter feature) — both of this session's last two
+passes are live, exactly as the twelfth pass's addendum expected. This
+sandbox's own `HEAD` is still stale (last real commit here was
+`9e7db35`, from well before this session started building), but that is
+only the local pointer — as in every prior pass, this is not a git
+repository in the shared sense (`CLAUDE.md`'s workflow: Claude edits,
+never commits/pushes, so this clone's `HEAD` only moves when a teammate
+pulls). Six key files were re-diffed against `origin/main:af14c59`
+content byte-for-byte before touching anything this pass
+(`tidestep/shelters.py`, `tidestep/validate.py`, `docs/STATUS.md`,
+`docs/LIMITATIONS.md`, `tidestep/routing.py`, `tidestep/db.py`) — all
+matched exactly, so this pass's work started from the real current state
+of the repo, not stale content.
+
+**1. Closed the one remaining item in the feature-work backlog**:
+"pushing `route_best_departure()`'s per-hour search down to only the
+hours between safety-state changes." Investigating this surfaced a more
+valuable, more general version of the same idea: `route_time_aware()`
+(the engine both `route_best_departure()` and
+`route_multi_stop_optimized()` are built on) fetches per-hour hazard
+data (`db.unsafe_edges`, `db.edge_hazard`) into a cache that was
+previously *local to each individual call* — so a caller making MANY
+back-to-back `route_time_aware()` calls that legitimately need the same
+hour's data (adjacent candidate departure hours whose trips both cross
+into the same next hour; every visiting-order permutation's first leg,
+which always starts at the same overall departure hour) was re-querying
+the database for hour data it had already fetched moments earlier.
+`route_time_aware()` now accepts an optional `_cache` dict; left `None`
+(the default — every existing caller, including both `/api/route` and
+`/api/route/advisory` via other methods) it behaves byte-for-byte as
+before. `route_best_departure()` now threads one shared cache across its
+whole hours-loop, and `route_multi_stop()`/`route_multi_stop_optimized()`
+do the same across a trip's legs and, more importantly, across every
+permutation `route_multi_stop_optimized()` tries (up to 720 for
+`MAX_OPTIMIZE_STOPS=6`). This changes no routing decision, no
+recommended hour, and no recommended order — proven by three new tests
+using a call-counting fake DB (`tests/test_routing.py`: +3) that assert
+the exact sequence of hours actually fetched, not just that results are
+still correct (which the existing 40 routing tests, unmodified and still
+passing, already covered). `route_multi_stop_optimized()` is where this
+actually pays off the most in practice — its permutation count grows
+factorially, `route_best_departure()`'s hour count is capped at 24.
+
+**2. Found two real, independently-documented historical dates that
+plausibly reached NWS minor flood stage at Kings Point** — the one piece
+Stage 9 validation has been missing since it was first run for real
+(see the twelfth pass: a real 30-day random sample never happened to
+include a day that reached NWS minor stage, which is expected — those
+days are rare — but meant `sensitivity` could never be computed, only
+the flood-extent correlation). This sandbox still cannot reach NOAA
+directly (confirmed again, same `overpass-api.de`/`api.tidesandcurrents.noaa.gov`
+proxy denial as every prior pass), but `WebSearch` (general web search,
+routed differently from the NOAA API calls this sandbox's egress policy
+blocks) is not subject to that restriction, and surfaced:
+- **2021-10-26 to 2021-10-27**: an official NWS New York (OKX) coastal
+  storm briefing (`weather.gov/media/okx/1026_coastalstorm_AM.pdf`)
+  explicitly stating "Minor to locally Moderate coastal flooding" with
+  "Inundation of 1 to 1 1/2 ft, locally 2 ft above ground, particularly
+  in vulnerable locales along **Western LI Sound**" — the exact shoreline
+  Kings Point sits on, and an NWS-authored source, not a news summary.
+- **2025-10-12 to 2025-10-13**: a nor'easter serious enough that Governor
+  Hochul declared a state of emergency for NYC, Long Island, and
+  Westchester County (CBS New York, the NY Governor's office); north-shore
+  (Long Island Sound) peak high tide was reported around 4pm Monday
+  (Oct 13). Less definitively confirmed at the Kings Point gauge
+  specifically than the 2021 date above (no NWS bulletin text was found
+  quoting Kings Point/Western Sound directly for this one, only general
+  NYC/Long Island coverage), but recent and well-documented, worth
+  including as a second candidate.
+
+Neither date has been run — this sandbox still cannot reach NOAA's
+CO-OPS API for the actual water-level pull `validate_stage9.py` needs,
+only `WebSearch` (a different, unblocked egress path) got this far. This
+is a concrete, ready-to-run task for the laptop — see "Next" below for
+the exact command. If the Kings Point gauge actually crossed NWS minor
+stage on either date, this finally produces a real `sensitivity` number
+to put in the submission, alongside the flood-extent correlation already
+confirmed from the all-calm sample.
+
+**3. Closed two real test-coverage gaps, found by re-checking every
+existing test file endpoint-by-endpoint / branch-by-branch against the
+code, not by chasing a coverage percentage for its own sake:**
+- `GET /api/network/chokepoints` (the eleventh pass's resilience-analysis
+  endpoint) had **zero** tests in `tests/test_api.py`, unlike every
+  other endpoint in that file, which all have at minimum a "rejects
+  unknown profile before touching the database" test and a "valid
+  request reaches the router" test. `resilience.find_chokepoints()`
+  itself was already tested for profile validation
+  (`tests/test_resilience.py`), but that never proved `api.py`'s own
+  pre-check (`if profile not in hazard.PROFILES: raise
+  HTTPException(400, ...)`) actually runs and short-circuits before the
+  database — the exact thing every sibling endpoint's test in that file
+  exists to prove for its own route. Added the same two tests plus a
+  third confirming the `profile="adult"` default is itself valid
+  (`tests/test_api.py`: +3; `api.py` coverage 70% -> 72% in this
+  sandbox).
+- `Router._edge_time_s()`'s "osmnx couldn't assign a `travel_time` to
+  this vehicle edge" fallback (a documented conservative 30 km/h
+  assumption, so a real data gap in OSM's speed-limit tags can't make an
+  edge look free to cross and wrongly win every shortest-path
+  comparison) had never actually been exercised by any test — not
+  `travel_time` missing, not present-but-`None` (which some osmnx
+  versions produce instead of omitting the key). Three direct unit tests
+  added: the normal case (uses `travel_time` when present), the missing
+  case, and the `None` case, plus one confirming pedestrian profiles
+  correctly ignore `travel_time` entirely and use
+  `config.WALK_SPEED_MPS` instead (`tests/test_routing.py`: +3;
+  `routing.py` coverage 97% -> 98%).
+
+Full suite after this pass: **142 passed, 37 skipped** (same DB/network
+skip reasons as every prior pass), zero regressions from anything this
+pass touched.
+
 ## Done (2026-09-13, twelfth pass — real shelter-location data for
 route_to_safety(), plus a hard look at what this sandbox and the laptop
 bridge can and can't actually do right now)
@@ -1154,35 +1273,37 @@ default largest-component filter silently dropped the entire west shore
 fetch_all -> build_hazard -> load_db again. DEM will be ~4x larger
 (about 150 MB); build_hazard should take about a minute.
 
-## Next (all three of these are runnable on the laptop today in a normal
-terminal — none is blocked on tooling, only on Claude's current inability
-to execute commands there; see the top of this file's twelfth-pass note)
+## Next (everything below is runnable on the laptop today in a normal
+terminal — none of it is blocked on tooling)
 
-1. **Commit and push this pass's work — two commits.** Every file this
-   pass touched (shelter feature + the Stage 9 validation-metric fix
-   below) has been synced onto the laptop's clone (via the file bridge,
-   which still works even though command execution there currently
-   doesn't) — that clone was confirmed clean and exactly at `origin/main`
-   before syncing, so there is nothing to reconcile. From the laptop, in
-   `tidestep-app`:
+1. **The highest-value thing left before demo day: a targeted Stage 9 run
+   against the two real dates found this (thirteenth) pass**, instead of
+   another random 30-day sample (which — as the twelfth pass found —
+   is very unlikely to include a real NWS-minor-or-higher day by chance).
+   In the same terminal used before (venv activated, Postgres up isn't
+   required for this one — `validate_stage9.py` only needs
+   `data/segments.gpkg`/`data/dem_1m.tif`/`data/streets.graphml`, already
+   cached from the earlier real-data pass):
    ```
-   git add tidestep/shelters.py tidestep/config.py tidestep/db.py tidestep/routing.py tidestep/api.py
-   git add scripts/dev_seed.py scripts/load_db.py scripts/fetch_all.py
-   git add frontend/index.html ios/TideStep/Models.swift ios/TideStep/ContentView.swift
-   git add tests/test_shelters.py tests/test_db.py tests/test_routing.py tests/test_api.py tests/test_dev_seed.py tests/test_integration.py
-   git add docs/STATUS.md docs/LIMITATIONS.md docs/NOVELTY.md
-   git commit -m "stage11: real shelter-location data for route_to_safety(), with graceful fallback"
-   git add tidestep/validate.py scripts/validate_stage9.py tests/test_validate.py
-   git commit -m "stage9: fix validation metric that misreported real all-calm samples as 0% accuracy"
-   git push
+   python scripts/validate_stage9.py --dates 2021-10-26,2021-10-27,2025-10-12,2025-10-13
    ```
-   (The doc files land in the first commit since they cover both changes
-   in one file each — not worth a third commit just to split prose.
-   Coordinate with your teammate first if they might also have
-   uncommitted local changes on that machine, same as every prior pass's
-   note on this — this is the one step here that touches shared state.)
-2. **Fetch real shelter data and reload the live DB.** In the same
-   terminal, after `pip install -r requirements.txt` if needed:
+   2021-10-26/27 is an official NWS New York (OKX) coastal storm briefing
+   explicitly calling for "Minor to locally Moderate coastal flooding"
+   along "Western LI Sound" — the shoreline Kings Point sits on; see the
+   thirteenth-pass "Done" section above for the source and exact quote.
+   2025-10-12/13 is the nor'easter serious enough for a NYS state of
+   emergency (NYC/Long Island/Westchester), included as a second, more
+   recent candidate though less definitively confirmed at this specific
+   gauge. If either date's `[OK]`/`[MISS]` line shows `minor=Y`, paste
+   the resulting `sensitivity` number into the submission — that is the
+   one number Stage 9 has been missing since it was first run for real.
+   If NOAA's archive doesn't actually show minor stage at Kings Point on
+   either date (gauge-specific water levels can differ from a general
+   news report), the flood-extent correlation already confirmed
+   (r=0.97, r²=0.94) remains the submission's headline validation number
+   either way — this step can only add information, not take any away.
+2. **Fetch real shelter data and reload the live DB** (still not yet run
+   for real — this was the twelfth pass's step 2, still open):
    ```
    python -c "from tidestep import shelters; shelters.fetch_shelters()"
    python scripts/load_db.py
@@ -1191,103 +1312,75 @@ to execute commands there; see the top of this file's twelfth-pass note)
    stations, community centers in the study bbox) and writes
    `data/shelters.gpkg`; the second loads segments+hazard+shelters into
    Postgres in one pass — it now loads shelters automatically if that
-   file exists (see this pass's `load_db.py` change above). Sanity-check
-   with `python -c "from tidestep import db; e=db.get_engine(); print(db.shelter_points(e))"`
+   file exists. Needs `docker compose up -d` first if Postgres isn't
+   already running (this was the error hit the last time `load_db.py`
+   was tried). Sanity-check with
+   `python -c "from tidestep import db; e=db.get_engine(); print(db.shelter_points(e))"`
    — should print a non-empty list of real building names.
 3. **Re-run `build_hazard.py`, then `load_db.py` again** (or restart
-   `hourly_update.py`'s cron loop) on the laptop's real cached data
-   (`data/dem_1m.tif`, `data/hazard.csv`, `data/segments.gpkg`,
-   `data/streets.graphml` are already there from an earlier real-data
-   pass) so the live database reflects every correctness fix from prior
-   passes (`near_inlet`, resilience analysis over real segments) *and*
-   this pass's shelter table, together.
-4. **`python scripts/validate_stage9.py --days 30`** — Stage 9 has never
-   actually been run anywhere. The logic is unit-tested and ready
-   (`tests/test_validate.py`, 5 passing); this just needs to hit NOAA for
-   real. Paste the printed sensitivity/specificity into the submission's
-   technical-challenges answer — this is the single highest-value thing
-   left to do before demo day, since it's the one artifact that turns "we
-   built a flood model" into "we checked it against reality."
-5. Record demo footage: the time slider across a real flood cycle, the
+   `hourly_update.py`'s cron loop) so the live database reflects every
+   correctness fix from prior passes *and* the shelter table, together.
+4. Record demo footage: the time slider across a real flood cycle, the
    profile switch showing the same trip flood-blind vs. flood-aware, and
-   (new this pass) "Evacuate to safety" naming an actual shelter building
-   once step 2 above has run.
-6. iOS app: see `ios/README.md` — Swift source (including this pass's
-   shelter-name annotation) is written and reviewed line by line against
-   the real API/DB response shapes, but still has never actually
-   compiled — needs a Mac. Still the single biggest unverified risk left
-   in the project.
+   "Evacuate to safety" naming an actual shelter building once step 2
+   above has run.
+5. iOS app: see `ios/README.md` — Swift source is written and reviewed
+   line by line against the real API/DB response shapes, but still has
+   never actually compiled — needs a Mac. Still the single biggest
+   unverified risk left in the project.
 
-Feature-work backlog, everything else already shipped: ~~stop-order
-optimization~~, ~~real shelter locations for `route_to_safety()`~~ (code
-this pass; live fetch is step 2 above), ~~iOS screens for
-`best_departure`/`multi_stop`/`chokepoints`~~ all done in earlier passes —
-see the "Done" sections above. Remaining backlog: pushing
-`route_best_departure()`'s per-hour search down to only the hours between
-safety-state changes, if this ever needs to run against a much larger
-street graph than this bbox's.
+Feature-work backlog: **empty** as of this pass — every item previously
+listed here (~~stop-order optimization~~, ~~real shelter locations for
+`route_to_safety()`~~, ~~iOS screens for
+`best_departure`/`multi_stop`/`chokepoints`~~, ~~push
+`route_best_departure()`'s per-hour search down~~) is done; see the
+"Done" sections above. What's left is real-world execution on the
+laptop (items 1-5 above), not new code.
 
-Test coverage gap (previously item 5 here) is **done** — see the top two
-sections: `test_dem.py`, `test_streets.py`, `test_segments.py`, `test_db.py`,
-`test_api.py`, `test_build_hazard_script.py`, `test_hourly_update.py` all
-added and passing; `tidestep/` package coverage is 95% (`pytest --cov`).
+Test coverage gap is **done** — see the top sections: `test_dem.py`,
+`test_streets.py`, `test_segments.py`, `test_db.py`, `test_api.py`,
+`test_build_hazard_script.py`, `test_hourly_update.py` all added and
+passing. **Correction this (thirteenth) pass**: re-measured with
+`pytest --cov=tidestep --cov-report=term-missing` in this sandbox and
+found **82%** package-wide, not the "95%" carried forward from the
+fourth pass (2026-09-08) — that figure was accurate *at the time* (a
+smaller package, before `shelters.py`/`resilience.py` and more of
+`db.py` existed) but has drifted and should not have been repeated
+unchecked in later passes; fixed here rather than left wrong. The gap is
+concentrated exactly where expected, not spread randomly:
+`tidestep/validate.py`/`config.py`/`streets.py` are 100%,
+`routing.py`/`hazard.py`/`dem.py`/`segments.py` are 97-98%, but
+`db.py` (22%), `shelters.py` (42%), `resilience.py` (69%), `api.py`
+(70%), and `coops.py`/`floodfill.py` (72-77%) are low **only** because
+their real coverage requires a live Postgres or live NOAA/Overpass
+network access this sandbox doesn't have — the same 37 tests that have
+skipped every pass for exactly this reason (`SKIP` markers, not
+failures). Re-running `pytest --cov=tidestep --cov-report=term-missing`
+on the laptop, where Postgres can actually run, would give the real
+number; this sandbox's 82% is a lower bound, not a diagnosis of
+untested logic.
 
 ## Uncommitted work
-**Everything through the eleventh pass (network-wide resilience analysis,
-commit `12879f9`) is confirmed pushed and live on `origin/main`** — this
-was independently re-verified this (twelfth) pass by fetching origin and
-diffing every file this pass was about to touch against origin/main's
-copy before changing anything (byte-identical in every case: `db.py`,
-`routing.py`, `api.py`, `config.py`, `frontend/index.html`,
-`scripts/build_hazard.py`, `scripts/hourly_update.py`, `README.md`,
-`docs/LIMITATIONS.md`, and the laptop's own working copy of those same
-files, all matched `origin/main` exactly). Only **this pass's shelter
-feature, plus the same-day Stage 9 validation-metric fix**, are new and
-uncommitted, listed in the twelfth-pass "Done" section and its addendum
-above. Files touched **this pass (twelfth)**:
-- New: `tidestep/shelters.py`, `tests/test_shelters.py` (+5).
-- Modified (shelter feature): `tidestep/config.py`
-  (`SHELTER_ANNOTATE_MAX_M`), `tidestep/db.py` (`shelters` table +
-  `load_shelters`/`shelter_points`/`nearest_shelter`), `tidestep/routing.py`
-  (`SafeHavenResult`'s 3 new fields, `Router._shelter_preferred_targets`/
-  `_shelter_annotation`, `route_to_safety(..., prefer_shelters=True)`),
-  `tidestep/api.py` (`prefer_shelters` query param), `frontend/index.html`
-  (shelter-name annotation in `findSafety()`), `ios/TideStep/Models.swift`
-  (`SafeHavenProperties`'s 3 new fields), `ios/TideStep/ContentView.swift`
-  (`shelterNote()`, updated `safetySummary()`), `scripts/dev_seed.py`
-  (`build_shelters_gdf()`, `main()` loads it), `scripts/load_db.py`
-  (loads `data/shelters.gpkg` if present), `scripts/fetch_all.py` (step
-  5/5 fetches shelters), `tests/test_db.py` (+8), `tests/test_routing.py`
-  (+10), `tests/test_api.py` (+1), `tests/test_dev_seed.py` (+1),
-  `tests/test_integration.py` (+1).
-- Modified (Stage 9 validation-metric fix, same day, after you ran it for
-  real): `tidestep/validate.py` (`flood_extent_correlation()`, wired into
-  `summarize()`), `scripts/validate_stage9.py` (prints the correlation +
-  an explanatory note instead of a bare misleading 0%),
-  `tests/test_validate.py` (+2).
-- Docs (cover both changes above): `docs/LIMITATIONS.md`,
-  `docs/NOVELTY.md` (+1 entry), `docs/STATUS.md` (this section + addendum).
-
-**Note on where this was written vs. where to commit from**: this pass's
-code was written in a cloud sandbox clone whose local git history had
-fallen 10 commits behind `origin/main` (its working tree content was
-still current — confirmed identical to `origin/main` file-by-file before
-editing, so nothing was built on stale code — but its `HEAD` pointer
-itself was stale, from before this session pulled). Every changed/new
-file was synced via the file bridge onto **the laptop's clone**, which
-was confirmed to be a clean, up-to-date checkout of `origin/main` before
-syncing (`git log`-equivalent size/diff checks matched exactly). **Commit
-and push from the laptop**, not the cloud sandbox, so you don't have to
-reconcile stale local git state first:
+**None on the laptop's `git` state** (nothing here needs it — see below).
+Everything through the twelfth pass (shelter feature, commit `3ae6433`;
+Stage 9 validation-metric fix, commit `af14c59`) was pushed and
+independently reconfirmed live on `origin/main` at the start of this
+(thirteenth) pass (`git fetch origin` + `git log`). This pass's own work
+— the `route_time_aware()`/`route_best_departure()`/
+`route_multi_stop_optimized()` hazard-cache sharing, plus the two
+test-coverage gaps closed above — has been synced to the laptop's clone
+the same way every prior pass's work was (file bridge; that clone was
+confirmed to be a clean up-to-date checkout of `af14c59` before syncing,
+and every synced file was round-trip diff-verified byte-identical after
+writing, not just assumed to have landed correctly). Files touched this
+pass: `tidestep/routing.py` (hazard-cache sharing),
+`tests/test_routing.py` (+6: 3 cache tests, 3 `_edge_time_s` tests),
+`tests/test_api.py` (+3: chokepoints endpoint), `docs/STATUS.md` (this
+section), `docs/LIMITATIONS.md` (routing section note). From the laptop,
+in `tidestep-app`:
 ```
-git add tidestep/shelters.py tidestep/config.py tidestep/db.py tidestep/routing.py tidestep/api.py
-git add scripts/dev_seed.py scripts/load_db.py scripts/fetch_all.py
-git add frontend/index.html ios/TideStep/Models.swift ios/TideStep/ContentView.swift
-git add tests/test_shelters.py tests/test_db.py tests/test_routing.py tests/test_api.py tests/test_dev_seed.py tests/test_integration.py
-git add docs/STATUS.md docs/LIMITATIONS.md docs/NOVELTY.md
-git commit -m "stage11: real shelter-location data for route_to_safety(), with graceful fallback"
-git add tidestep/validate.py scripts/validate_stage9.py tests/test_validate.py
-git commit -m "stage9: fix validation metric that misreported real all-calm samples as 0% accuracy"
+git add tidestep/routing.py tests/test_routing.py tests/test_api.py docs/STATUS.md docs/LIMITATIONS.md
+git commit -m "perf+tests: share hazard-lookup cache across repeated route_time_aware() calls; close chokepoints endpoint and _edge_time_s fallback test gaps"
 git push
 ```
 **Coordinate with your teammate before running this** — same shared-`.git`
