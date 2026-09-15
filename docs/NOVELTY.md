@@ -1,7 +1,7 @@
 # Why TideStep is different — and why that matters for judging
 
 This is a working document, not marketing copy: every claim below is checked
-against what TideStep's code actually does (see `tidestep/floodmodel.py`,
+against what TideStep's code actually does (see `tidestep/floodfill.py`,
 `tidestep/hazard.py`, `tidestep/routing.py`) and against public descriptions
 of specific past Congressional App Challenge (CAC) winners, cited by name.
 Where a comparison app's exact internals aren't publicly documented, this
@@ -117,7 +117,7 @@ tool nobody had packaged this way for this problem.
    around a live, hours-ahead operational forecast (NOAA NYOFS) resolved
    down to individual street segments.
 2. **Hydrologically-connected flood extent, not a bathtub fill.** TideStep's
-   flood-fill (`tidestep/floodmodel.py`) uses connected-component labeling
+   flood-fill (`tidestep/floodfill.py`) uses connected-component labeling
    seeded from open water, so a low-lying inland basin that isn't actually
    plumbed to the sea is correctly *not* flagged as flooded even though its
    elevation is below the tide level — matching NOAA's own Sea Level Rise

@@ -232,6 +232,21 @@ alert can read "floods starting around 4:00 PM today" ahead of time.
 
 ## Validation
 
-- **Stage 9 (retroactive validation against a real past high-tide-flooding
-  day at Kings Point) has not been run yet.** This is the next priority
-  before demo recording — see docs/STATUS.md.
+- **Stage 9 (retroactive validation against real past high-tide-flooding
+  days at Kings Point) is done — see the "Threshold source mismatch"
+  entry under "Forecast" above for the full real results** (30-day
+  random sample: r=0.97/r²=0.94 flood-extent correlation; 4-day targeted
+  sample against two documented real coastal storms: 100% sensitivity,
+  r=0.997/r²=0.993). `data/validation.csv` holds the row-level numbers
+  from the most recent run; `scripts/validate_stage9.py` is the CLI to
+  rerun it against a different date range or date list.
+- **Not yet validated**: the shelter-preference feature
+  (`route_to_safety()`'s real-building preference, see "Routing" above)
+  against real fetched shelter data — the fetch itself hasn't been run
+  yet (same open item as above) — and the resilience/chokepoint analysis
+  (`/api/network/chokepoints`) hasn't been checked against any real
+  documented infrastructure-isolation event, only against the synthetic
+  `dev_seed.py` scenario and unit tests. Both are real, load-bearing
+  features with real test coverage; neither has a "did this match a
+  real historical case" validation pass the way the core flood model
+  does.

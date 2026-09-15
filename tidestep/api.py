@@ -4,6 +4,10 @@
 
 Endpoints
 ---------
+GET  /api/config                        station, bbox, profiles, and safety thresholds -- static
+                                         reference data a client fetches once on startup (no DB
+                                         hit), so it can render labels/limits before the first
+                                         forecast call lands
 GET  /api/hours                         list of forecast hours (index + valid_time + water level)
 GET  /api/risk?hour=H[&bbox=s,w,n,e]    GeoJSON of segment hazard states at hour H
 GET  /api/route?olat&olon&dlat&dlon&profile&hour[&time_aware=true]

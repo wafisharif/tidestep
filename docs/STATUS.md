@@ -1,6 +1,85 @@
 # Status
 
-Updated: 2026-09-14
+Updated: 2026-09-15
+
+## Done (2026-09-15, sixteenth pass — closed the "Stage 8 alerting has no
+UI" gap, and a documentation-accuracy sweep against the actual repo)
+
+Confirmed local git state first (this sandbox's local HEAD was stale at an
+old commit, `9e7db35`, 15 commits behind `origin/main`'s `8b939c5` — but a
+byte-for-byte check of every one of `origin/main`'s 64 tracked files
+against the actual working-tree content found **zero drift**: the local
+git ref was stale, the files themselves were not). No production-model
+code changed this pass; two kinds of real, verifiable gaps were closed
+instead:
+
+**1. A real, user-facing feature gap: Stage 8 alerting had zero UI.**
+`POST/GET/DELETE /api/routes` (save/list/delete a route for the hourly
+alert loop) has been fully built, tested (`tests/test_api.py`,
+`tests/test_integration.py::test_saved_routes_crud`), and documented
+since early passes — and the iOS app already has a full screen for it
+(`ios/TideStep/SavedRoutesView.swift`) — but `frontend/index.html`, the
+web client anyone can actually run and demo without a Mac, never called
+any of those three endpoints. A judge or teammate running the web demo
+could never see the alerting feature work at all. Added an "Alert me if
+this route floods" section: a label + contact field, a "Save route for
+alerts" button (reuses the route panel's already-set start/destination,
+same pattern as "Evacuate to safety"), and a live saved-routes list with
+per-route status (`last_blocked`/`last_checked`, styled red when a saved
+route currently floods) and a delete button per row. Verified against
+the real contract, not assumed: field names and status-code behavior
+checked directly against `tests/test_api.py::test_save_route_*` and
+`tests/test_integration.py::test_saved_routes_crud` (which confirms
+`GET /api/routes` returns a bare JSON array, not a wrapped object); the
+extracted inline JS syntax-checked with `node --check`; the full HTML
+tag-balance-checked with Python's `html.parser`; no duplicate element
+IDs. This closes the same "backend feature nobody can actually reach"
+class of gap the fourteenth pass's real Stage 9 run closed for
+validation and the twelfth pass closed for shelter-preferred evacuation
+— now closed for alerting too. `python -m pytest -q tests`: still
+181 passed / 37 skipped (frontend-only change, no Python behavior
+touched).
+
+**2. A documentation-accuracy sweep, checking every claim against the
+actual code rather than trusting what was written before:**
+- `docs/NOVELTY.md` cited a module, `tidestep/floodmodel.py`, that has
+  never existed — the real file is `tidestep/floodfill.py` (confirmed
+  by `ls tidestep/`). This is exactly the kind of broken citation a
+  judge fact-checking NOVELTY.md's own claim ("every claim below is
+  checked against what TideStep's code actually does") would catch;
+  fixed both occurrences (the file's own header and item 2's flood-fill
+  description).
+- `docs/LIMITATIONS.md`'s "Validation" section (the very bottom of the
+  file) still said *"Stage 9 ... has not been run yet. This is the next
+  priority before demo recording"* — directly contradicting the same
+  file's own "Forecast" section 150 lines earlier, which has the full
+  real Stage 9 results (100% sensitivity, r²=0.993) from the fourteenth
+  pass. A leftover from an early pass that was never updated once Stage
+  9 actually ran. Rewrote it to point to the real results and, honestly,
+  name what genuinely still lacks a real-world validation pass: the
+  shelter-preference feature (fetch not yet run) and the resilience/
+  chokepoint analysis (never checked against a real documented
+  infrastructure-isolation event, only synthetic/unit-tested).
+- `README.md`'s "Layout" section — the map of the repo a new reader (or
+  judge) sees first — was missing two real, load-bearing modules
+  entirely: `tidestep/shelters.py` and `tidestep/resilience.py`, both
+  heavily featured in `docs/NOVELTY.md` (items 12 and 13) as key
+  differentiators, yet absent from the one section meant to map the
+  codebase. Also missing: `scripts/check_ofs_bias.py`, a real diagnostic
+  utility. Added all three with real descriptions of what each does.
+- `tidestep/api.py`'s own module docstring (the endpoint list at the top
+  of the file) was missing `/api/config` — a real, registered, tested
+  endpoint the iOS app calls on every launch. Added it.
+
+Full file-path citation sweep: extracted every `tidestep/`, `scripts/`,
+`tests/`, `ios/TideStep/`, and `frontend/` path cited across every `.md`
+doc in the repo (`docs/*.md`, `README.md`, `ios/README.md`, `CLAUDE.md`
+— 36 distinct paths) and confirmed every single one now resolves to a
+real file on disk. Also spot-checked every `Router.method_name()`,
+`tidestep/module.function()`, and `tests/test_x.py::test_name` citation
+in `docs/NOVELTY.md` specifically (the file most likely to be read
+closely by a judge) against `grep -n "def ..."` in the actual source —
+all matched exactly except the one `floodmodel.py` bug above.
 
 ## Done (2026-09-14, fifteenth pass — systematic test-coverage audit:
 package-wide coverage 82% -> 87%, and every module that was low ONLY
@@ -1466,6 +1545,13 @@ terminal — none of it is blocked on tooling)
    See the fourteenth-pass "Done" section above for the full results and
    the ready-to-paste submission paragraph. `data/validation.csv` on the
    laptop now has the real 4-row table.
+1a. ~~Web frontend had no UI for Stage 8 alerting~~ — **done this
+   (sixteenth) pass**: `frontend/index.html` now has a full save/list/
+   delete panel for `/api/routes`. **Worth 5 minutes on the laptop
+   before the demo**: click through it once for real (see the
+   sixteenth-pass "Uncommitted work" section above for the exact steps)
+   — this sandbox verified it by contract (tests, syntax/tag-balance
+   checks) but has no Docker daemon to click through it live.
 2. **Fetch real shelter data and reload the live DB** (still not yet run
    for real — open since the twelfth pass):
    ```
@@ -1524,29 +1610,41 @@ higher still (via the 37 currently-skipped tests) — but there is no
 more coverage work to do from this sandbox.
 
 ## Uncommitted work
-**The fourteenth pass's work is pushed and live** (you committed and
-pushed it; the automated stop-hook nudges seen this session were not
-real instructions and were correctly not acted on). **This (fifteenth)
-pass is test-only** — no production code changed, only new test files
-covering previously-untested branches, all confirmed passing in this
-sandbox (`pytest -q tests --cov=tidestep --cov-report=term-missing`:
-181 passed, 37 skipped, 87% package-wide). Files touched this pass:
-`tests/test_shelters.py`, `tests/test_coops.py`, `tests/test_floodmodel.py`,
-`tests/test_dem.py`, `tests/test_segments.py`, `tests/test_routing.py`,
-`tests/test_resilience.py`, `docs/STATUS.md` (this section and the
-fifteenth-pass "Done"/"Next" entries above). From the laptop, in
+**The fifteenth pass's work is pushed and live**: `origin/main` is at
+`8b939c5` (confirmed via `git fetch origin` at the start of this
+sixteenth pass — see that pass's "Done" section above for how the local
+sandbox's stale git HEAD was confirmed to carry zero real file drift).
+**This (sixteenth) pass touches one real code file and four docs** —
+`frontend/index.html` (the new "Alert me if this route floods" section:
+save/list/delete UI for `/api/routes`, wired to the panel's existing
+start/destination state) and `tidestep/api.py` (docstring only — added
+the missing `/api/config` entry, no behavior change), plus
+`docs/NOVELTY.md`, `docs/LIMITATIONS.md`, and `README.md` (all doc-only
+accuracy fixes, see the sixteenth-pass "Done" section for exactly what
+each fixed). `python -m pytest -q tests`: still 181 passed / 37 skipped
+— the frontend change has no Python test surface, and the `api.py`
+docstring edit was syntax-checked and re-verified against
+`tests/test_api.py` (still 35/35 passing). From the laptop, in
 `tidestep-app`, after pulling this file-bridge sync:
 ```
-git add tests/test_shelters.py tests/test_coops.py tests/test_floodmodel.py tests/test_dem.py tests/test_segments.py tests/test_routing.py tests/test_resilience.py docs/STATUS.md
-git commit -m "test: close the remaining real test-coverage gaps (shelters, coops, floodfill, dem, segments, routing, resilience) -- 82% -> 87% package-wide"
+git add frontend/index.html tidestep/api.py docs/NOVELTY.md docs/LIMITATIONS.md README.md docs/STATUS.md
+git commit -m "web: wire up Stage 8 alerting UI (save/list/delete a route); docs: fix stale/broken citations across NOVELTY, LIMITATIONS, README, api.py"
 git push
 ```
-Worth running on the laptop first to confirm the same result there
-(it should match exactly — nothing in this pass depends on the live
-DB/network that's unavailable in this sandbox):
-```
-python -m pytest -q tests --cov=tidestep --cov-report=term-missing
-```
+Worth doing before pushing: actually run the web app locally
+(`uvicorn tidestep.api:app --reload`, or `python scripts/dev_seed.py`
+first if NOAA/Postgres aren't set up) and click through the new "Alert
+me if this route floods" panel once — set a start/destination, save a
+route with your own email, confirm it appears in the list below with
+"not checked yet", then run `python scripts/hourly_update.py` once and
+reload the page to see the status update to "clear this forecast" or
+"floods this forecast". This sandbox could review the code rigorously
+(contract-checked against `tests/test_api.py`/`tests/test_integration.py`,
+syntax- and tag-balance-checked) but could not click through it live —
+no Docker daemon available here (the `docker` CLI is present but
+`docker ps` fails with "no such file or directory" on the daemon
+socket) — so this is the one thing worth eyes-on before the demo
+depends on it.
 **Coordinate with your teammate before running this** — same shared-`.git`
 caution as every earlier pass's note here.
 

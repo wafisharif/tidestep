@@ -33,7 +33,13 @@
   #advisory .caption { font-size:11px; color:var(--muted); margin-top:3px; }
   .section { margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
   .section h2 { font-size:12px; font-weight:600; margin:0 0 4px; text-transform:uppercase; letter-spacing:.02em; color:var(--muted); }
-  #tripResult, #safetyResult, #chokepointResult { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
+  #tripResult, #safetyResult, #chokepointResult, #alertMsg { font-size:13px; margin-top:8px; background:var(--panel); padding:8px; border-radius:6px; display:none; }
+  #savedRoutes { margin-top:8px; font-size:12px; }
+  #savedRoutes .sr { display:flex; justify-content:space-between; align-items:center; gap:6px; padding:5px 0; border-top:1px solid var(--line); }
+  #savedRoutes .sr:first-child { border-top:none; }
+  #savedRoutes .sr .meta { color:var(--muted); }
+  #savedRoutes .sr .blocked { color:#c62828; font-weight:600; }
+  #savedRoutes button.mini { width:auto; padding:2px 8px; margin:0; font-size:11px; background:var(--panel); color:var(--fg); border-color:var(--line); }
 </style>
 </head>
 <body>
@@ -62,6 +68,16 @@
   <button id="clear" class="secondary">Clear</button>
   <div id="result"></div>
   <div id="advisory"></div>
+
+  <div class="section">
+    <h2>Alert me if this route floods</h2>
+    <div class="hint">Uses the start/destination set above (Stage 8: the hourly refresh checks every saved route and emails you the first hour it becomes unsafe).</div>
+    <input type="text" id="alertLabel" placeholder="label (optional), e.g. commute">
+    <input type="text" id="alertContact" placeholder="email or phone" style="margin-top:4px">
+    <button id="saveAlert" class="secondary">Save route for alerts</button>
+    <div id="alertMsg"></div>
+    <div id="savedRoutes"></div>
+  </div>
 
   <div class="section">
     <h2>Multi-stop trip</h2>
@@ -226,6 +242,54 @@ async function renderAdvisory() {
     `<div class="caption">Safe to leave now &nbsp;→&nbsp; +24h for this trip` +
     (nUnsafe ? ` · unsafe ${nUnsafe} of ${a.hours.length} hours` : ' · safe the whole window') + `</div>`;
 }
+
+// --- Stage 8: saved routes / alerts --------------------------------------
+// POST/GET/DELETE /api/routes are fully built and tested on the backend
+// (tidestep/db.py, scripts/hourly_update.py's hourly alert loop) but had no
+// UI at all until this pass -- a user could never actually reach the
+// alerting feature described in docs/PIPELINE.md Stage 8 through the app.
+// This reuses the route panel's start/dest, exactly like "Evacuate to
+// safety" above reuses `start`.
+async function loadSavedRoutes() {
+  const el = $('savedRoutes');
+  const r = await fetch('/api/routes');
+  const rows = await r.json();
+  if (!rows.length) { el.innerHTML = '<div class="hint">No saved routes yet.</div>'; return; }
+  el.innerHTML = rows.map(row => {
+    const label = row.label || `${row.olat.toFixed(3)},${row.olon.toFixed(3)} -> ${row.dlat.toFixed(3)},${row.dlon.toFixed(3)}`;
+    const status = row.last_blocked === true ? '<span class="blocked">floods this forecast</span>'
+                 : row.last_blocked === false ? 'clear this forecast' : 'not checked yet';
+    return `<div class="sr"><span><b>${label}</b><br><span class="meta">${row.profile} · ${row.contact} · ${status}</span></span>` +
+           `<button class="mini" data-id="${row.route_id}">delete</button></div>`;
+  }).join('');
+  el.querySelectorAll('button.mini').forEach(b => b.onclick = () => deleteSavedRoute(+b.dataset.id));
+}
+
+async function deleteSavedRoute(id) {
+  await fetch('/api/routes/' + id, { method: 'DELETE' });
+  loadSavedRoutes();
+}
+
+async function saveAlert() {
+  const el = $('alertMsg'); el.style.display = 'block';
+  if (!start || !dest) { el.innerHTML = 'Set a start and destination above first (click the map twice).'; return; }
+  const contact = $('alertContact').value.trim();
+  if (!contact) { el.innerHTML = 'Enter an email or phone number to be alerted at.'; return; }
+  const body = { label: $('alertLabel').value.trim(), contact, profile: $('profile').value,
+                olat: start.lat, olon: start.lng, dlat: dest.lat, dlon: dest.lng };
+  const r = await fetch('/api/routes', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.status !== 200) {
+    const j = await r.json().catch(() => ({}));
+    const detail = typeof j.detail === 'string' ? j.detail : (j.detail ? JSON.stringify(j.detail) : r.statusText);
+    el.innerHTML = `Couldn't save: ${detail}`;
+    return;
+  }
+  el.innerHTML = 'Saved — you\'ll be alerted the first hour this route floods.';
+  $('alertLabel').value = ''; $('alertContact').value = '';
+  loadSavedRoutes();
+}
+$('saveAlert').onclick = saveAlert;
 
 // --- multi-stop trip planning ------------------------------------------
 // route_multi_stop() chains time-aware legs, each starting from the
@@ -404,6 +468,7 @@ $('play').onclick = e => {
 };
 
 loadHours().then(() => showHour(0));
+loadSavedRoutes();
 </script>
 </body>
 </html>

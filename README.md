@@ -108,10 +108,17 @@ tidestep/hazard.py     depth + child/adult/vehicle safety flags (3)
 tidestep/db.py         PostGIS schema, loaders, queries (4)
 tidestep/api.py        FastAPI endpoints (5)
 tidestep/routing.py    networkx flood-avoiding Dijkstra + route_window (6, 8)
+tidestep/shelters.py   real shelter buildings (school/hospital/fire/police/
+                        community center) from OSM, for route_to_safety (11)
+tidestep/resilience.py network-wide chokepoint (single point of failure)
+                        analysis, ranked by forecast flood exposure
 frontend/index.html    Leaflet map + time slider + route form (7)
 scripts/hourly_update.py  operational loop + predictive alerts (8)
 tidestep/validate.py   Stage 9: retroactive check against real NOAA history
 scripts/validate_stage9.py  CLI for the above
+scripts/check_ofs_bias.py  diagnostic: OFS/predictions vs. observed water
+                        level over the last 48h, to catch a datum mismatch
+                        before trusting a forecast
 scripts/dev_seed.py     synthetic fixture: offline demo + integration tests
 tests/test_integration.py  real FastAPI + real PostGIS, no mocks
 ios/                    SwiftUI client (MapKit risk map, routing, alerts)
