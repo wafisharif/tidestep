@@ -31,7 +31,7 @@ import networkx as nx
 from rasterio.transform import from_origin
 from shapely.geometry import LineString, Point, Polygon
 
-from tidestep import db, floodfill, hazard, segments, streets  # noqa: E402
+from tidestep import config, db, floodfill, hazard, segments, streets  # noqa: E402
 
 GRID = 300                      # 300 x 300 m tile, 1 m/px
 ORIGIN_LON, ORIGIN_LAT = -73.700, 40.900   # nowhere near the real bbox, on purpose
@@ -123,8 +123,8 @@ def build_shelters_gdf() -> gpd.GeoDataFrame:
         geometry=[Point(ll(280, 220)), Point(ll(-50, -50))], crs=4326)
 
 
-def synthetic_tide(hours: int = 24) -> pd.Series:
-    """A plausible 24 h semidiurnal-ish tide: two highs, peak at hour 9
+def synthetic_tide(hours: int = config.FORECAST_HOURS) -> pd.Series:
+    """A plausible semidiurnal-ish tide over the forecast window: two highs, peak at hour 9
     reaching 1.0 m NAVD88 (floods Shore Rd + Cove Rd but not Basin Rd)."""
     t = np.arange(hours)
     wl = 0.2 + 0.6 * (0.5 - 0.5 * np.cos(2 * np.pi * t / 12.42)) \
@@ -162,7 +162,8 @@ def build_scenario():
 
     seeds = floodfill.build_seed_mask(dem, transform, water, "EPSG:4326")
     wl = synthetic_tide()
-    table = hazard.hazard_table(segs, dem, seeds, wl)
+    table = hazard.hazard_table(segs, dem, seeds, wl,
+                                scenarios_cm=tuple(config.SLR_SCENARIOS_CM))
     return dem, transform, segs, seeds, wl, table, G
 
 

@@ -40,19 +40,64 @@
   #savedRoutes .sr .meta { color:var(--muted); }
   #savedRoutes .sr .blocked { color:#c62828; font-weight:600; }
   #savedRoutes button.mini { width:auto; padding:2px 8px; margin:0; font-size:11px; background:var(--panel); color:var(--fg); border-color:var(--line); }
+  #nws { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:1100; max-width:min(640px, 92vw); display:none;
+         background:#fff8e1; border:1px solid #f9a825; color:#5d4037; border-radius:8px; padding:8px 12px; font-size:13px; box-shadow:0 2px 10px rgba(0,0,0,.12); }
+  #nws.warning { background:#ffebee; border-color:#c62828; color:#7f0000; }
+  #nws b { display:block; }
+  #nws .src { font-size:11px; color:var(--muted); }
+  .scenario { display:flex; gap:6px; align-items:center; margin-top:4px; }
+  .scenario select, .scenario input { flex:1; }
+  .scenario button { width:auto; margin:0; padding:6px 10px; }
+  .badge { display:inline-block; font-size:11px; padding:1px 6px; border-radius:10px; background:#e3f2fd; color:#0d47a1; margin-left:6px; vertical-align:middle; }
+  .badge.replay { background:#ede7f6; color:#4a148c; }
+  #panelToggle { display:none; position:absolute; right:10px; top:10px; width:auto; margin:0; padding:4px 10px; font-size:12px; background:var(--panel); color:var(--fg); border-color:var(--line); }
+  #panel .body { max-height:calc(100vh - 140px); overflow:auto; }
+  @media (max-width: 700px) {
+    #panel { top:auto; bottom:0; left:0; right:0; width:auto; border-radius:12px 12px 0 0; padding:10px 14px calc(10px + env(safe-area-inset-bottom, 0px)); box-shadow:0 -2px 10px rgba(0,0,0,.15); }
+    #panel .body { max-height:42vh; }
+    #panel.collapsed .body { display:none; }
+    #panelToggle { display:block; }
+    #time { bottom:auto; top:10px; left:10px; right:10px; transform:none; width:auto; padding:8px 10px; }
+    #time .big { font-size:14px; }
+    #nws { top:78px; }
+    .leaflet-control-zoom { display:none; }
+    h1 { font-size:15px; }
+    select, input[type=text], button { font-size:16px; }   /* stops iOS zoom-on-focus */
+  }
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="nws" role="status"></div>
 
 <div id="panel">
-  <h1>TideStep</h1>
-  <div class="sub" id="station">Kings Point, NY · 24 h tidal flooding forecast</div>
+  <button id="panelToggle" type="button">hide</button>
+  <h1>TideStep <span class="badge" id="modeBadge">forecast</span></h1>
+  <div class="sub" id="station">Kings Point, NY · 36 h tidal flooding forecast</div>
+  <div class="body">
+
+  <label>Sea level scenario</label>
+  <div class="scenario">
+    <select id="slr">
+      <option value="0" selected>today</option>
+      <option value="30">+30 cm (~2050, NOAA Intermediate)</option>
+      <option value="60">+60 cm (~2070, NOAA Intermediate)</option>
+      <option value="100">+100 cm (~2100, NOAA Intermediate)</option>
+    </select>
+  </div>
+  <label>Replay a past day</label>
+  <div class="scenario">
+    <input type="date" id="replayDate" max="">
+    <button id="replayGo" class="secondary" type="button">Replay</button>
+    <button id="replayOff" class="secondary" type="button" style="display:none">Back</button>
+  </div>
+  <div class="hint" id="replayHint">Runs the model on the tide gauge's recorded levels for that day. Try 2022-12-23 (Shore Road closure). First load of a new day takes about a minute.</div>
 
   <label>Who is traveling?</label>
   <select id="profile">
     <option value="child">Child (limit 0.5 m)</option>
     <option value="adult" selected>Adult (limit 1.2 m)</option>
+    <option value="wheelchair">Wheelchair (0.15 m, no stairs, ≤ 8.3 % grade)</option>
     <option value="vehicle_small">Small car (0.3 m)</option>
     <option value="vehicle_large">SUV / large car (0.4 m)</option>
     <option value="vehicle_4wd">Truck / 4WD (0.5 m)</option>
@@ -107,12 +152,13 @@
   </div>
 
   <div class="legend">
-    <span><i class="sw" style="background:#2e7d32"></i>safe</span>
+    <span><i class="sw" style="background:#2e7d32"></i>safe (shown when zoomed in)</span>
     <span><i class="sw" style="background:#f9a825"></i>flooded, passable</span>
     <span><i class="sw" style="background:#c62828"></i>unsafe for profile</span>
     <span><i class="sw" style="background:#0b5fff;height:5px"></i>route</span>
     <span><i class="sw" style="background:#4a148c;height:5px"></i>chokepoint</span>
   </div>
+  </div><!-- .body -->
 </div>
 
 <div id="time">
@@ -122,7 +168,7 @@
     <span id="nflood">—</span>
   </div>
   <input type="range" id="slider" min="0" max="23" value="0" step="1">
-  <div class="row hint"><span id="t0">now</span><span>▶ <a href="#" id="play">play</a></span><span id="t1">+24 h</span></div>
+  <div class="row hint"><span id="t0">now</span><span>▶ <a href="#" id="play">play</a></span><span id="t1">+36 h</span></div>
 </div>
 
 <script src="/static/leaflet.js"></script>
@@ -132,7 +178,18 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   { attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19 }).addTo(map);
 
 let hours = [], hour = 0, riskLayer = null, routeLayer = null;
-let cache = {};          // hour -> geojson
+let cache = {};          // "<mode>:<hour>" -> geojson
+let slr = 0;             // sea-level-rise scenario in cm (0 = plain forecast)
+let replayDate = null;   // "YYYY-MM-DD" when replaying a past day, else null
+const modeKey = () => replayDate ? `replay:${replayDate}` : `slr:${slr}`;
+const hoursUrl = () => replayDate ? `/api/replay/${replayDate}/hours` : `/api/hours?slr_cm=${slr}`;
+const riskUrl = (h, extra) => (replayDate ? `/api/replay/${replayDate}/risk?hour=${h}` : `/api/risk?hour=${h}&slr_cm=${slr}`) + extra;
+// The study area is ~55k segments (~28 MB per hour as GeoJSON). Two layers:
+//   floodLayer  every FLOODED segment in the whole area (a few hundred) — always shown
+//   detailLayer every segment inside the current viewport, only at zoom >= DETAIL_ZOOM,
+//               so the green "safe" streets appear when you look closely
+const DETAIL_ZOOM = 15;
+let detailLayer = null, detailKey = null, moveTimer = null;
 let start = null, dest = null, startMk = null, destMk = null;
 let stops = [], stopMarkers = [], legLayers = [], safetyLayer = null;
 const $ = id => document.getElementById(id);
@@ -147,22 +204,55 @@ function style(f) {
 }
 function popup(f, layer) {
   const p = f.properties;
+  const steep = p.grade_pct != null && p.grade_pct > 8.33;
   layer.bindPopup(`<b>${p.name || p.highway || 'segment'}</b><br>
-    ground ${p.ground_m?.toFixed(2)} m NAVD88<br>
-    depth <b>${p.depth_cm} cm</b>${p.near_inlet ? ' · near inlet' : ''}<br>
+    ground ${p.ground_m?.toFixed(2)} m NAVD88${p.grade_pct != null ? ` · grade ${p.grade_pct.toFixed(1)} %` : ''}<br>
+    depth <b>${p.depth_cm} cm</b>${p.near_inlet ? ' · near inlet' : ''}${p.scenario_cm ? ` · +${p.scenario_cm} cm sea level` : ''}${p.replay ? ' · replay' : ''}<br>
     child ${p.safe_child ? '✓' : '✗'} · adult ${p.safe_adult ? '✓' : '✗'} ·
+    wheelchair ${p.safe_wheelchair ? '✓' : '✗'}${steep ? ' (too steep)' : ''} ·
     car ${p.safe_vehicle_small ? '✓' : '✗'} · 4WD ${p.safe_vehicle_4wd ? '✓' : '✗'}`);
 }
 
 async function loadHours() {
-  const r = await fetch('/api/hours'); const j = await r.json();
+  const r = await fetch(hoursUrl());
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
+  const j = await r.json();
   hours = j.hours;
   $('slider').max = hours.length - 1;
   const fmt = t => new Date(t).toLocaleString([], { weekday: 'short', hour: 'numeric' });
   $('t0').textContent = fmt(hours[0].valid_time);
   $('t1').textContent = fmt(hours[hours.length - 1].valid_time);
-  if (j.run_time) $('station').textContent =
-    `Kings Point, NY · forecast run ${new Date(j.run_time).toLocaleString()} · NYOFS bias ${j.ofs_bias_m?.toFixed(2)} m removed`;
+  const badge = $('modeBadge');
+  if (replayDate) {
+    badge.textContent = `replay ${replayDate}`; badge.className = 'badge replay';
+    $('station').textContent = `Kings Point, NY · observed water levels on ${replayDate}`;
+  } else {
+    badge.textContent = slr ? `+${slr} cm sea level` : 'forecast'; badge.className = 'badge';
+    if (j.run_time) $('station').textContent =
+      `Kings Point, NY · forecast run ${new Date(j.run_time).toLocaleString()} · NYOFS bias ${j.ofs_bias_m?.toFixed(2)} m removed` +
+      (slr ? ` · +${slr} cm added to every hour` : '');
+  }
+}
+
+function viewportBbox() {
+  const b = map.getBounds();
+  return [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map(v => v.toFixed(4)).join(',');
+}
+
+async function showDetail() {
+  // full segment state for the visible area, only when zoomed in
+  if (map.getZoom() < DETAIL_ZOOM) {
+    if (detailLayer) { map.removeLayer(detailLayer); detailLayer = null; detailKey = null; }
+    return;
+  }
+  const key = `${modeKey()}:${hour}:${viewportBbox()}`;
+  if (key === detailKey) return;
+  if (!cache[key]) { const r = await fetch(riskUrl(hour, `&bbox=${viewportBbox()}`)); cache[key] = await r.json(); }
+  if (key !== `${modeKey()}:${hour}:${viewportBbox()}`) return;   // user moved on meanwhile
+  if (detailLayer) map.removeLayer(detailLayer);
+  detailLayer = L.geoJSON(cache[key], { style, onEachFeature: popup }).addTo(map);
+  detailKey = key;
+  if (riskLayer) riskLayer.bringToFront();
 }
 
 async function showHour(h) {
@@ -171,18 +261,30 @@ async function showHour(h) {
   $('tlabel').textContent = new Date(info.valid_time).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
   $('wl').textContent = `water level ${info.water_level_m.toFixed(2)} m NAVD88`;
   $('nflood').textContent = `${info.flooded_segments} flooded segments`;
-  if (!cache[h]) { const r = await fetch('/api/risk?hour=' + h); cache[h] = await r.json(); }
+  const key = `${modeKey()}:${h}:flooded`;
+  if (!cache[key]) { const r = await fetch(riskUrl(h, '&flooded_only=true')); cache[key] = await r.json(); }
   if (riskLayer) map.removeLayer(riskLayer);
-  riskLayer = L.geoJSON(cache[h], { style, onEachFeature: popup }).addTo(map);
-  if (!map._fitted) { map.fitBounds(riskLayer.getBounds()); map._fitted = true; }
+  riskLayer = L.geoJSON(cache[key], { style, onEachFeature: popup }).addTo(map);
+  if (!map._fitted) {
+    const cfg = await (await fetch('/api/config')).json();
+    const [s, w, n, e] = cfg.bbox;
+    map.fitBounds([[s, w], [n, e]]); map._fitted = true;
+  }
+  showDetail();
   if (start && dest) route();
 }
+map.on('moveend', () => { clearTimeout(moveTimer); moveTimer = setTimeout(showDetail, 250); });
 
 async function route() {
   if (!start || !dest) return;
-  const timeAware = $('timeAware').checked;
+  if (replayDate) {
+    const res = $('result'); res.style.display = 'block';
+    res.innerHTML = 'Routing uses the live forecast, not the replayed day. Click <b>Back</b> to route.';
+    return;
+  }
+  const timeAware = $('timeAware').checked && slr === 0;
   const q = new URLSearchParams({ olat: start.lat, olon: start.lng, dlat: dest.lat, dlon: dest.lng,
-                                  profile: $('profile').value, hour, time_aware: timeAware });
+                                  profile: $('profile').value, hour, time_aware: timeAware, slr_cm: slr });
   const r = await fetch('/api/route?' + q); const f = await r.json();
   if (routeLayer) map.removeLayer(routeLayer);
   const res = $('result'); res.style.display = 'block';
@@ -202,7 +304,8 @@ async function route() {
     res.innerHTML = `<b>${km(p.length_m)}</b>` +
       (p.baseline_blocked ? ` — the usual route (${km(p.baseline_length_m)}) crosses water; detour avoids ${p.avoided_edges} unsafe edges.`
                           : ` — usual route is clear at this hour.`) +
-      (p.max_depth_cm_on_route > 0 ? `<br>Deepest water on route: ${p.max_depth_cm_on_route} cm.` : '');
+      (p.max_depth_cm_on_route > 0 ? `<br>Deepest water on route: ${p.max_depth_cm_on_route} cm.` : '') +
+      (slr ? `<br><span class="hint">Computed with +${slr} cm sea level.</span>` : '');
   }
   renderAdvisory();
 }
@@ -239,7 +342,7 @@ async function renderAdvisory() {
   }
   el.innerHTML = `<div class="strip">${cells}</div>` +
     `<div class="caption">${rec}</div>` +
-    `<div class="caption">Safe to leave now &nbsp;→&nbsp; +24h for this trip` +
+    `<div class="caption">Safe to leave now &nbsp;→&nbsp; +${a.hours.length} h for this trip` +
     (nUnsafe ? ` · unsafe ${nUnsafe} of ${a.hours.length} hours` : ' · safe the whole window') + `</div>`;
 }
 
@@ -455,9 +558,48 @@ $('clear').onclick = () => {
   start = dest = null; [startMk, destMk, routeLayer].forEach(l => l && map.removeLayer(l));
   $('from').value = $('to').value = ''; $('result').style.display = 'none'; $('advisory').innerHTML = '';
 };
-$('profile').onchange = () => { if (riskLayer) riskLayer.setStyle(style); route(); renderChokepoints(); };
+$('profile').onchange = () => { if (riskLayer) riskLayer.setStyle(style); if (detailLayer) detailLayer.setStyle(style); route(); renderChokepoints(); };
 $('timeAware').onchange = route;
 $('slider').oninput = e => showHour(+e.target.value);
+
+async function switchMode() {
+  if (timer) { clearInterval(timer); timer = null; $('play').textContent = 'play'; }
+  $('timeAware').disabled = slr !== 0 || !!replayDate;
+  $('replayOff').style.display = replayDate ? '' : 'none';
+  $('slr').disabled = !!replayDate;
+  const btn = $('replayGo'); btn.disabled = true; btn.textContent = replayDate ? 'loading…' : 'Replay';
+  try {
+    await loadHours();
+    $('slider').value = 0;
+    await showHour(0);
+  } catch (e) {
+    $('replayHint').textContent = `Could not load: ${e.message}`;
+    if (replayDate) { replayDate = null; return switchMode(); }
+  } finally { btn.disabled = false; btn.textContent = 'Replay'; }
+}
+$('slr').onchange = e => { slr = +e.target.value; switchMode(); };
+$('replayGo').onclick = () => { const d = $('replayDate').value; if (!d) return; replayDate = d; switchMode(); };
+$('replayOff').onclick = () => { replayDate = null; switchMode(); };
+{ const y = new Date(); y.setDate(y.getDate() - 1); $('replayDate').max = y.toISOString().slice(0, 10); }
+
+$('panelToggle').onclick = () => {
+  const c = $('panel').classList.toggle('collapsed');
+  $('panelToggle').textContent = c ? 'show' : 'hide';
+};
+
+async function loadAlerts() {
+  try {
+    const r = await fetch('/api/alerts'); const j = await r.json();
+    const el = $('nws');
+    const a = j.coastal_alerts && j.coastal_alerts[0];
+    if (!a) { el.style.display = 'none'; return; }
+    const ends = a.ends ? ` until ${new Date(a.ends).toLocaleString([], { weekday: 'short', hour: 'numeric' })}` : '';
+    el.className = /Warning/.test(a.event) ? 'warning' : '';
+    el.innerHTML = `<b>NWS ${a.event}${ends}</b>${a.headline || ''}<div class="src">${a.sender || 'National Weather Service'} · official alert shown alongside TideStep's street-level model</div>`;
+    el.style.display = 'block';
+  } catch (e) { /* offline: no banner */ }
+}
+loadAlerts(); setInterval(loadAlerts, 10 * 60 * 1000);
 
 let timer = null;
 $('play').onclick = e => {

@@ -51,7 +51,7 @@ the gauge outside and lost the whole west shore to osmnx's
 largest-component filter.)
 
 ## Forecast window
-24 hours ahead, hourly steps, refreshed hourly.
+36 hours ahead (NYOFS guidance covers 48 h from each model cycle; revised from 24 h on 2026-09-15), hourly steps, refreshed hourly.
 
 ## What is modeled
 Still-water tidal ponding: water surface = station forecast water level

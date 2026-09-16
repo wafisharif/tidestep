@@ -51,6 +51,9 @@ from . import config, db
 NON_DRIVABLE = {"footway", "path", "steps", "cycleway", "pedestrian",
                 "bridleway", "corridor", "track"}
 VEHICLE_PROFILES = {"vehicle_small", "vehicle_large", "vehicle_4wd"}
+# a wheelchair can use any pedestrian-legal way except stairs; the ADA grade
+# limit is applied per segment in hazard.classify (static safe_wheelchair)
+WHEELCHAIR_EXCLUDED = {"steps"}
 
 # route_multi_stop_optimized() brute-forces every permutation of the
 # intermediate stops. 6! = 720 permutations (each a handful of
@@ -70,6 +73,8 @@ def _highway_set(data) -> set[str]:
 def edge_allowed(profile: str, data) -> bool:
     if profile in VEHICLE_PROFILES:
         return not _highway_set(data) <= NON_DRIVABLE
+    if profile == "wheelchair":
+        return not (_highway_set(data) & WHEELCHAIR_EXCLUDED)
     return True
 
 
@@ -270,9 +275,11 @@ class Router:
         return w
 
     def route(self, origin: tuple[float, float], destination: tuple[float, float],
-              profile: str, forecast_hour: int) -> RouteResult | None:
-        unsafe = db.unsafe_edges(self.engine, forecast_hour, profile)
-        depth = db.edge_hazard(self.engine, forecast_hour)
+              profile: str, forecast_hour: int, scenario_cm: int = 0) -> RouteResult | None:
+        """Flood-avoiding route at one hour. ``scenario_cm`` picks a
+        sea-level-rise scenario (0 = plain forecast)."""
+        unsafe = db.unsafe_edges(self.engine, forecast_hour, profile, scenario_cm)
+        depth = db.edge_hazard(self.engine, forecast_hour, scenario_cm)
         depth_by_edge = {(r.u, r.v, r.key): int(r.depth_cm) for r in depth.itertuples()}
 
         s, t = self.nearest(*origin, profile), self.nearest(*destination, profile)

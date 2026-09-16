@@ -13,7 +13,8 @@ first in every session.
   commits are authored by the teammate.
 - One stage per commit where possible; commit messages start with the stage
   number, e.g. `stage1: CO-OPS client + datum conversion`.
-- Keep `docs/STATUS.md` current: what is done, what is next, what is blocked.
+- Keep `docs/STATUS.md` current and SHORT (one page: what works, what is
+  next). Narrative of each working session goes in `docs/CHANGELOG.md`.
 - Do not commit data downloads (DEM tiles, OSM caches). They go in `data/`
   which is git-ignored. Scripts must be able to regenerate them.
 

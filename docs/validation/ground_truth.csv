@@ -1,0 +1,14 @@
+event_date,peak_ft_mllw,street,town,expect_flooded,source
+2014-12-09,10.2,Shore Road,Port Washington,true,"NWS OKX Kings Point impact catalog: ""minor coastal flooding on Shore Road, Sunset Park on Main Street, Secor Drive"""
+2014-12-09,10.2,Main Street,Port Washington,true,NWS OKX Kings Point impact catalog (Sunset Park on Main Street)
+2014-12-09,10.2,Secor Drive,Port Washington,true,NWS OKX Kings Point impact catalog
+2017-03-14,10.8,Shore Road,Port Washington,true,"NWS OKX Kings Point impact catalog: ""minor flooding on Shore Road, Port Washington Estates, Sunset Park on Main Street"""
+2017-03-14,10.8,Main Street,Port Washington,true,NWS OKX Kings Point impact catalog (Sunset Park on Main Street)
+2019-12-30,10.8,Shore Road,Port Washington,true,NWS OKX Kings Point impact catalog (same statement as 2017-03-14)
+2019-12-30,10.8,Main Street,Port Washington,true,NWS OKX Kings Point impact catalog (Sunset Park on Main Street)
+2022-12-23,11.8,Shore Road,Port Washington,true,Patch 2022-12-23: Shore Road closed Main Street to Mill Pond Road ~9:00-12:30 for severe flooding; peak from NWS OKX catalog
+2022-12-23,11.8,Mill Pond Road,Port Washington,true,Patch 2022-12-23 (closure endpoint at Mill Pond Road)
+calm (MHHW),7.8,Shore Road,Port Washington,false,Negative control at MHHW (7.80 ft MLLW): no NWS impact statement below 10.2 ft; a normal high tide must not flood the road
+calm (MHHW),7.8,Main Street,Port Washington,false,Negative control at MHHW
+calm (MHHW),7.8,Secor Drive,Port Washington,false,Negative control at MHHW
+calm (MHHW),7.8,Mill Pond Road,Port Washington,false,Negative control at MHHW

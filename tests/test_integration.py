@@ -29,6 +29,8 @@ pytest.importorskip("fastapi")
 
 from sqlalchemy import create_engine, text  # noqa: E402
 
+from tidestep import config  # noqa: E402
+
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://tidestep:tidestep@localhost:5432/tidestep")
 
@@ -85,7 +87,8 @@ def test_hours_endpoint_matches_loaded_data(seeded_app):
     body = r.json()
     assert len(body["hours"]) == table.forecast_hour.nunique()
     # flooded_segments per hour must match what hazard_table actually computed
-    by_hour = table.groupby("forecast_hour").flooded.sum()
+    # (for the plain forecast, scenario_cm == 0)
+    by_hour = table[table.scenario_cm == 0].groupby("forecast_hour").flooded.sum()
     for row in body["hours"]:
         assert row["flooded_segments"] == int(by_hour[row["hour"]])
 
@@ -413,7 +416,7 @@ def test_chokepoints_endpoint_finds_the_real_vehicle_only_chokepoints(seeded_app
     assert spur_mid["nodes_isolated"] == 2     # losing 7-10 strands {1, 7} together
     assert spur_tip["hours_unsafe"] > spur_mid["hours_unsafe"]
     for props in (spur_tip, spur_mid):
-        assert props["hours_total"] == 24
+        assert props["hours_total"] == config.FORECAST_HOURS
         # priority_score is a pure derived field -- must always self-check
         assert props["priority_score"] == props["nodes_isolated"] * props["hours_unsafe"]
     # ranked by priority_score descending -- the flooding chokepoint first
@@ -426,3 +429,49 @@ def test_chokepoints_endpoint_rejects_bad_profile_against_real_app(seeded_app):
     client, *_ = seeded_app
     r = client.get("/api/network/chokepoints", params={"profile": "bogus"})
     assert r.status_code == 400
+
+
+# --- sea-level-rise scenarios and the wheelchair profile (added 2026-09-15) ---
+
+def test_hours_and_risk_per_scenario(seeded_app):
+    client, *_ = seeded_app
+    base = client.get("/api/hours").json()
+    up = client.get("/api/hours?slr_cm=100").json()
+    assert base["slr_cm"] == 0 and up["slr_cm"] == 100
+    assert set(up["scenarios_available"]) >= {0, 100}
+    assert len(up["hours"]) == len(base["hours"]) == config.FORECAST_HOURS
+    # +1 m of sea level floods at least as much at every hour, and strictly
+    # more at the synthetic peak
+    for b, u in zip(base["hours"], up["hours"]):
+        assert u["water_level_m"] == pytest.approx(b["water_level_m"] + 1.0, abs=1e-4)
+        assert u["flooded_segments"] >= b["flooded_segments"]
+    assert max(h["flooded_segments"] for h in up["hours"]) > \
+        max(h["flooded_segments"] for h in base["hours"])
+    r = client.get("/api/risk?hour=9&slr_cm=100&flooded_only=true").json()
+    assert r["features"] and all(f["properties"]["flooded"] for f in r["features"])
+    assert all(f["properties"]["scenario_cm"] == 100 for f in r["features"])
+    assert client.get("/api/hours?slr_cm=45").status_code == 400
+    assert client.get("/api/risk?hour=0&slr_cm=45").status_code == 400
+
+
+def test_route_under_scenario_and_wheelchair(seeded_app):
+    client, *_ = seeded_app
+    o = dict(olat=40.9, olon=-73.6998, dlat=40.9, dlon=-73.6748)
+    a = client.get("/api/route", params={**o, "profile": "adult", "hour": 0}).json()
+    s = client.get("/api/route", params={**o, "profile": "adult", "hour": 0, "slr_cm": 100}).json()
+    assert a["properties"]["slr_cm"] == 0 and s["properties"]["slr_cm"] == 100
+    # with +1 m the synthetic shore road is under water: either a longer
+    # detour with more avoided edges, or no safe route at all
+    if s["geometry"] is not None:
+        assert s["properties"]["avoided_edges"] >= a["properties"]["avoided_edges"]
+    else:
+        assert "no safe route" in s["properties"]["error"]
+    w = client.get("/api/route", params={**o, "profile": "wheelchair", "hour": 0})
+    assert w.status_code == 200
+    # time-aware routing is only defined for the plain forecast
+    r = client.get("/api/route", params={**o, "profile": "adult", "hour": 0,
+                                         "slr_cm": 30, "time_aware": True})
+    assert r.status_code == 400
+    feats = client.get("/api/risk?hour=0").json()["features"]
+    assert all("safe_wheelchair" in f["properties"] for f in feats)
+    assert all("grade_pct" in f["properties"] for f in feats)

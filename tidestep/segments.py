@@ -56,8 +56,9 @@ def segment_edges(edges: gpd.GeoDataFrame,
 
 
 def sample_min_elevation(segments: gpd.GeoDataFrame, dem_path) -> pd.DataFrame:
-    """Minimum DEM value (m NAVD88) along each segment and the DEM pixel
-    (row, col) where it occurs. ground_m is NaN if the segment is off-DEM.
+    """Minimum DEM value (m NAVD88) along each segment, the DEM pixel
+    (row, col) where it occurs, and the segment's running grade in percent
+    (|first sample - last sample| / length). All NaN if off-DEM.
 
     The pixel is kept so the flood-fill stage can ask "is this segment's low
     point inside the connected flooded region" with a single array lookup.
@@ -70,7 +71,8 @@ def sample_min_elevation(segments: gpd.GeoDataFrame, dem_path) -> pd.DataFrame:
         H, W = dem.shape
         metric = segments.to_crs(METRIC_CRS)
         in_dem_crs = segments.to_crs(crs)
-        out = np.full((len(segments), 3), np.nan, dtype="float64")
+        out = np.full((len(segments), 4), np.nan, dtype="float64")
+        lengths = metric.geometry.length.to_numpy()
         for i, (geom_m, geom_d) in enumerate(zip(metric.geometry, in_dem_crs.geometry)):
             # sample at 1 m spacing in metric space, then map those fractions
             # onto the DEM-CRS geometry to get pixel coordinates
@@ -86,9 +88,14 @@ def sample_min_elevation(segments: gpd.GeoDataFrame, dem_path) -> pd.DataFrame:
             vals = dem[r, c]
             if np.isfinite(vals).any():
                 j = int(np.nanargmin(vals))
-                out[i] = (vals[j], r[j], c[j])
+                finite = np.flatnonzero(np.isfinite(vals))
+                # running grade between the first and last DEM samples along
+                # the segment, in percent; used by the wheelchair profile
+                rise = abs(vals[finite[-1]] - vals[finite[0]])
+                grade = 100.0 * rise / lengths[i] if lengths[i] > 0 else np.nan
+                out[i] = (vals[j], r[j], c[j], grade)
     df = pd.DataFrame(out, index=segments.index,
-                      columns=["ground_m", "min_row", "min_col"])
+                      columns=["ground_m", "min_row", "min_col", "grade_pct"])
     df["min_row"] = df["min_row"].astype("Int64")
     df["min_col"] = df["min_col"].astype("Int64")
     return df

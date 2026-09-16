@@ -20,7 +20,7 @@ STATION_LON = -73.7649
 BBOX = (40.795, -73.775, 40.845, -73.695)
 
 # --- Forecast window -------------------------------------------------------
-FORECAST_HOURS = 24
+FORECAST_HOURS = 36   # NYOFS guidance covers 48 h from each cycle; 36 keeps a margin
 REFRESH_MINUTES = 60
 
 # --- Datums for 8516945, feet above station datum (STND) --------------------
@@ -71,10 +71,24 @@ FLOOD_THRESHOLDS_M_NAVD88 = {
 DEPTH_LIMIT_M = {
     "child": 0.5,
     "adult": 1.2,
+    "wheelchair": 0.15,
     "vehicle_small": 0.3,
     "vehicle_large": 0.4,
     "vehicle_4wd": 0.5,
 }
+
+# --- Wheelchair profile ------------------------------------------------------
+# Still-water depth limit above is deliberately low: a manual chair's front
+# casters are ~75-150 mm in diameter and standing water at caster-hub height
+# stalls the chair and hides curb edges and drain openings. 0.15 m is an
+# assumption grounded in caster geometry, not a published flood-safety
+# threshold; the FD2321 / ARR literature that gives the child/adult/vehicle
+# limits does not cover wheelchair users. Stated as such in LIMITATIONS.md.
+# Grade limit is the ADA Standards for Accessible Design running-slope maximum
+# for an accessible route (1:12 = 8.33 %). Segments steeper than this are
+# marked unsafe for the wheelchair profile at every hour, so the router
+# avoids them; the map popup labels them "too steep".
+WHEELCHAIR_MAX_GRADE_PCT = 8.33
 DEPTH_VELOCITY_LIMIT_M2S = {
     "child": 0.4,
     "adult": 0.6,   # conservative end of the 0.6-0.8 band
@@ -116,7 +130,32 @@ MAX_HOUR = FORECAST_HOURS - 1
 WALK_SPEED_MPS = {
     "child": 1.0,
     "adult": 1.4,
+    "wheelchair": 1.0,   # typical self-propelled manual chair on level ground
 }
+
+# --- Sea-level-rise scenarios -------------------------------------------------
+# Each scenario adds a constant offset to every forecast water level before
+# the flood-fill runs, so the same 36 h tide cycle can be viewed as it would
+# play out with higher mean sea level. Offsets are rounded values from the
+# NOAA 2022 Sea Level Rise Technical Report (Sweet et al. 2022) regional
+# projections for the New York City area under the Intermediate scenario:
+# roughly +0.3 m by 2050, +0.6 m by ~2070, +1.0 m by ~2100 (relative to
+# 2000). They are illustrative round numbers, not the report's exact
+# gridded values; see docs/LIMITATIONS.md.
+SLR_SCENARIOS_CM = [0, 30, 60, 100]
+SLR_SCENARIO_LABELS = {
+    0: "today",
+    30: "+30 cm (~2050, NOAA Intermediate)",
+    60: "+60 cm (~2070, NOAA Intermediate)",
+    100: "+100 cm (~2100, NOAA Intermediate)",
+}
+
+# --- NWS alerts ---------------------------------------------------------------
+# api.weather.gov active alerts for the study area. The NWS API requires a
+# descriptive User-Agent; no key. Cached in-process for NWS_CACHE_SECONDS.
+NWS_ALERTS_URL = "https://api.weather.gov/alerts/active"
+NWS_USER_AGENT = "TideStep (github.com/wafisharif/tidestep)"
+NWS_CACHE_SECONDS = 600
 
 # --- Real shelter-location preference for route_to_safety (Stage 11) -------
 # tidestep/shelters.py fetches real candidate shelter buildings (schools,

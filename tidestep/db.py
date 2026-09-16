@@ -3,7 +3,9 @@
 Tables
 ------
 segments      one row per road segment; geom is a LineString (EPSG:4326)
-hazard        one row per (segment_id, valid_time) for the current run
+hazard        one row per (scenario_cm, segment_id, valid_time) for the current
+              run; scenario_cm = 0 is the plain forecast, 30/60/100 are the
+              sea-level-rise scenarios from config.SLR_SCENARIOS_CM
 forecast_runs one row per hourly recompute (run_time, bias, hours)
 saved_routes  user-saved origin/destination/profile for alerting (Stage 8)
 
@@ -38,6 +40,7 @@ CREATE TABLE IF NOT EXISTS segments (
     name        TEXT, highway TEXT,
     length_m    REAL, ground_m REAL,
     near_inlet  BOOLEAN NOT NULL DEFAULT FALSE,
+    grade_pct   REAL,
     geom        geometry(LineString, 4326) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS segments_geom_idx ON segments USING GIST (geom);
@@ -51,6 +54,7 @@ CREATE TABLE IF NOT EXISTS forecast_runs (
 );
 
 CREATE TABLE IF NOT EXISTS hazard (
+    scenario_cm         INTEGER NOT NULL DEFAULT 0,
     segment_id          INTEGER NOT NULL REFERENCES segments(segment_id),
     forecast_hour       INTEGER NOT NULL,
     valid_time          TIMESTAMPTZ NOT NULL,
@@ -59,12 +63,12 @@ CREATE TABLE IF NOT EXISTS hazard (
     flooded             BOOLEAN NOT NULL,
     safe_child          BOOLEAN NOT NULL,
     safe_adult          BOOLEAN NOT NULL,
+    safe_wheelchair     BOOLEAN NOT NULL DEFAULT TRUE,
     safe_vehicle_small  BOOLEAN NOT NULL,
     safe_vehicle_large  BOOLEAN NOT NULL,
     safe_vehicle_4wd    BOOLEAN NOT NULL,
-    PRIMARY KEY (segment_id, valid_time)
+    PRIMARY KEY (scenario_cm, segment_id, valid_time)
 );
-CREATE INDEX IF NOT EXISTS hazard_hour_idx ON hazard (forecast_hour);
 
 CREATE TABLE IF NOT EXISTS shelters (
     shelter_id  SERIAL PRIMARY KEY,
@@ -89,58 +93,150 @@ CREATE TABLE IF NOT EXISTS saved_routes (
 """
 
 
+# Idempotent upgrades for databases created before a column existed. Each
+# runs every init_schema() call and is a no-op once applied. The hazard
+# primary key is rebuilt only if it does not yet include scenario_cm.
+MIGRATIONS = """
+ALTER TABLE segments ADD COLUMN IF NOT EXISTS grade_pct REAL;
+ALTER TABLE hazard ADD COLUMN IF NOT EXISTS scenario_cm INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE hazard ADD COLUMN IF NOT EXISTS safe_wheelchair BOOLEAN NOT NULL DEFAULT TRUE;
+DROP INDEX IF EXISTS hazard_hour_idx;
+CREATE INDEX IF NOT EXISTS hazard_scen_hour_idx ON hazard (scenario_cm, forecast_hour);
+CREATE INDEX IF NOT EXISTS hazard_segment_idx ON hazard (segment_id);
+"""
+
+_HAZARD_PK_HAS_SCENARIO = """
+SELECT COUNT(*) FROM information_schema.key_column_usage
+WHERE table_name = 'hazard' AND constraint_name = 'hazard_pkey'
+  AND column_name = 'scenario_cm'
+"""
+
+
 def init_schema(engine) -> None:
     with engine.begin() as conn:
         for stmt in SCHEMA.split(";"):
             if stmt.strip():
                 conn.execute(text(stmt))
+        for stmt in MIGRATIONS.split(";"):
+            if stmt.strip():
+                conn.execute(text(stmt))
+        if conn.execute(text(_HAZARD_PK_HAS_SCENARIO)).scalar_one() == 0:
+            conn.execute(text("ALTER TABLE hazard DROP CONSTRAINT IF EXISTS hazard_pkey"))
+            conn.execute(text(
+                "ALTER TABLE hazard ADD PRIMARY KEY (scenario_cm, segment_id, valid_time)"))
 
 
 def load_segments(engine, segments: gpd.GeoDataFrame) -> int:
     """Replace the segments table with ``segments`` (from build_segments)."""
     cols = ["segment_id", "u", "v", "key", "seg_idx", "name", "highway",
-            "length_m", "ground_m", "near_inlet", "geometry"]
+            "length_m", "ground_m", "near_inlet", "grade_pct", "geometry"]
     gdf = segments[[c for c in cols if c in segments.columns]].copy()
     if "near_inlet" not in gdf:
         gdf["near_inlet"] = False
+    if "grade_pct" not in gdf:
+        gdf["grade_pct"] = None
     gdf = gdf.rename(columns={"geometry": "geom"}).set_geometry("geom")
     gdf = gdf.set_crs(4326, allow_override=True)
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM hazard"))
-        conn.execute(text("DELETE FROM segments"))
+        # TRUNCATE, not DELETE: a row-by-row DELETE of 55k segments has to
+        # check the hazard foreign key for each row, and with millions of
+        # just-deleted hazard tuples not yet vacuumed that took >10 minutes.
+        # Truncating both tables together satisfies the FK and frees the
+        # space immediately.
+        conn.execute(text("TRUNCATE hazard, segments"))
     gdf.to_postgis("segments", engine, if_exists="append", index=False)
     return len(gdf)
 
 
 def load_hazard(engine, table: pd.DataFrame, ofs_bias_m: float = 0.0) -> int:
-    """Replace the hazard table with a new run."""
+    """Replace the hazard table with a new run (all scenarios at once)."""
     run_time = datetime.now(timezone.utc)
-    cols = ["segment_id", "forecast_hour", "valid_time", "water_level_m",
-            "depth_cm", "flooded", "safe_child", "safe_adult",
+    table = table.copy()
+    if "scenario_cm" not in table:
+        table["scenario_cm"] = 0
+    if "safe_wheelchair" not in table:
+        table["safe_wheelchair"] = True
+    cols = ["scenario_cm", "segment_id", "forecast_hour", "valid_time", "water_level_m",
+            "depth_cm", "flooded", "safe_child", "safe_adult", "safe_wheelchair",
             "safe_vehicle_small", "safe_vehicle_large", "safe_vehicle_4wd"]
     df = table[cols].copy()
     df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM hazard"))
+        conn.execute(text("TRUNCATE hazard"))
         conn.execute(text(
             "INSERT INTO forecast_runs (run_time, ofs_bias_m, hours) VALUES (:t, :b, :h)"),
             {"t": run_time, "b": float(ofs_bias_m), "h": int(df.forecast_hour.max()) + 1})
-    df.to_sql("hazard", engine, if_exists="append", index=False, chunksize=5000, method="multi")
+    df["scenario_cm"] = df["scenario_cm"].astype(int)
+    _bulk_insert(engine, "hazard", df)
     return len(df)
+
+
+def _bulk_insert(engine, table: str, df: pd.DataFrame) -> None:
+    """COPY-based insert (psycopg 3) with a to_sql fallback. With four SLR
+    scenarios the hazard table is ~5.5 M rows for the full study area;
+    COPY loads that in well under a minute where executemany takes many."""
+    cols = list(df.columns)
+    try:
+        raw = engine.raw_connection()
+        try:
+            cur = raw.cursor()
+            with cur.copy(f"COPY {table} ({', '.join(cols)}) FROM STDIN") as copy:
+                for row in df.itertuples(index=False, name=None):
+                    copy.write_row(row)
+            raw.commit()
+        finally:
+            raw.close()
+    except AttributeError:   # driver without .copy (not psycopg 3)
+        df.to_sql(table, engine, if_exists="append", index=False, chunksize=5000, method="multi")
 
 
 def valid_times(engine) -> list[datetime]:
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT DISTINCT valid_time FROM hazard ORDER BY valid_time")).all()
+            "SELECT DISTINCT valid_time FROM hazard WHERE scenario_cm = 0 "
+            "ORDER BY valid_time")).all()
     return [r[0] for r in rows]
 
 
-def risk_geojson(engine, forecast_hour: int, bbox=None) -> dict:
-    """GeoJSON FeatureCollection of every segment with its hazard state at
-    ``forecast_hour``. ``bbox`` = (south, west, north, east) optional."""
-    where = "WHERE h.forecast_hour = :h"
-    params = {"h": forecast_hour}
+def scenarios_available(engine) -> list[int]:
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT DISTINCT scenario_cm FROM hazard ORDER BY scenario_cm")).all()
+    return [int(r[0]) for r in rows]
+
+
+def segments_geojson(engine) -> dict:
+    """Static segment geometry + attributes (no hazard), for callers that
+    compute hazard themselves (historical replay, validation)."""
+    sql = """
+    SELECT json_build_object(
+      'type','FeatureCollection',
+      'features', COALESCE(json_agg(json_build_object(
+        'type','Feature',
+        'geometry', ST_AsGeoJSON(s.geom, 5)::json,
+        'properties', json_build_object(
+          'segment_id', s.segment_id, 'name', s.name, 'highway', s.highway,
+          'ground_m', s.ground_m, 'near_inlet', s.near_inlet,
+          'grade_pct', s.grade_pct))), '[]'::json))
+    FROM segments s
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text(sql)).scalar_one()
+    return row if isinstance(row, dict) else json.loads(row)
+
+
+def risk_geojson(engine, forecast_hour: int, bbox=None, scenario_cm: int = 0,
+                 flooded_only: bool = False) -> dict:
+    """GeoJSON FeatureCollection of segments with their hazard state at
+    ``forecast_hour`` under ``scenario_cm`` (0 = plain forecast).
+    ``bbox`` = (south, west, north, east) optional. ``flooded_only`` drops
+    dry segments: the full study area is ~55k segments (~28 MB), the
+    flooded subset a few hundred, so the map fetches the flooded set for the
+    whole area and the full set only for the visible viewport."""
+    where = "WHERE h.forecast_hour = :h AND h.scenario_cm = :sc"
+    params = {"h": forecast_hour, "sc": int(scenario_cm)}
+    if flooded_only:
+        where += " AND h.flooded"
     if bbox:
         where += " AND s.geom && ST_MakeEnvelope(:w, :s, :e, :n, 4326)"
         params.update(s=bbox[0], w=bbox[1], n=bbox[2], e=bbox[3])
@@ -149,13 +245,15 @@ def risk_geojson(engine, forecast_hour: int, bbox=None) -> dict:
       'type','FeatureCollection',
       'features', COALESCE(json_agg(json_build_object(
         'type','Feature',
-        'geometry', ST_AsGeoJSON(s.geom, 6)::json,
+        'geometry', ST_AsGeoJSON(s.geom, 5)::json,
         'properties', json_build_object(
           'segment_id', s.segment_id, 'name', s.name, 'highway', s.highway,
           'ground_m', s.ground_m, 'near_inlet', s.near_inlet,
+          'grade_pct', s.grade_pct, 'scenario_cm', h.scenario_cm,
           'valid_time', h.valid_time, 'water_level_m', h.water_level_m,
           'depth_cm', h.depth_cm, 'flooded', h.flooded,
           'safe_child', h.safe_child, 'safe_adult', h.safe_adult,
+          'safe_wheelchair', h.safe_wheelchair,
           'safe_vehicle_small', h.safe_vehicle_small,
           'safe_vehicle_large', h.safe_vehicle_large,
           'safe_vehicle_4wd', h.safe_vehicle_4wd))), '[]'::json))
@@ -166,7 +264,8 @@ def risk_geojson(engine, forecast_hour: int, bbox=None) -> dict:
     return row if isinstance(row, dict) else json.loads(row)
 
 
-def unsafe_edges(engine, forecast_hour: int, profile: str) -> set[tuple]:
+def unsafe_edges(engine, forecast_hour: int, profile: str,
+                 scenario_cm: int = 0) -> set[tuple]:
     """(u, v, key) of every graph edge that has at least one unsafe segment
     for ``profile`` at ``forecast_hour``. Used by the router.
 
@@ -180,10 +279,11 @@ def unsafe_edges(engine, forecast_hour: int, profile: str) -> set[tuple]:
     col = f"safe_{profile}"
     sql = f"""
     SELECT DISTINCT s.u, s.v, s.key FROM segments s JOIN hazard h USING (segment_id)
-    WHERE h.forecast_hour = :h AND NOT h.{col}
+    WHERE h.forecast_hour = :h AND h.scenario_cm = :sc AND NOT h.{col}
     """
     with engine.connect() as conn:
-        return {tuple(r) for r in conn.execute(text(sql), {"h": forecast_hour}).all()}
+        return {tuple(r) for r in conn.execute(
+            text(sql), {"h": forecast_hour, "sc": int(scenario_cm)}).all()}
 
 
 def always_safe_nodes(engine, hours, profile: str) -> set[int]:
@@ -213,7 +313,7 @@ def always_safe_nodes(engine, hours, profile: str) -> set[int]:
     SELECT s.u, s.v FROM segments s
     WHERE s.segment_id IN (
         SELECT h.segment_id FROM hazard h
-        WHERE h.forecast_hour = ANY(:hours)
+        WHERE h.forecast_hour = ANY(:hours) AND h.scenario_cm = 0
         GROUP BY h.segment_id
         HAVING COUNT(*) = :n AND BOOL_AND(h.{col})
     )
@@ -227,19 +327,20 @@ def always_safe_nodes(engine, hours, profile: str) -> set[int]:
     return nodes
 
 
-def edge_hazard(engine, forecast_hour: int) -> pd.DataFrame:
+def edge_hazard(engine, forecast_hour: int, scenario_cm: int = 0) -> pd.DataFrame:
     """Per-edge max depth and min safety at an hour (for route annotation)."""
     sql = """
     SELECT s.u, s.v, s.key, MAX(h.depth_cm) AS depth_cm,
            BOOL_AND(h.safe_child) AS safe_child, BOOL_AND(h.safe_adult) AS safe_adult,
+           BOOL_AND(h.safe_wheelchair) AS safe_wheelchair,
            BOOL_AND(h.safe_vehicle_small) AS safe_vehicle_small,
            BOOL_AND(h.safe_vehicle_large) AS safe_vehicle_large,
            BOOL_AND(h.safe_vehicle_4wd) AS safe_vehicle_4wd
     FROM segments s JOIN hazard h USING (segment_id)
-    WHERE h.forecast_hour = :h GROUP BY s.u, s.v, s.key
+    WHERE h.forecast_hour = :h AND h.scenario_cm = :sc GROUP BY s.u, s.v, s.key
     """
     with engine.connect() as conn:
-        return pd.read_sql(text(sql), conn, params={"h": forecast_hour})
+        return pd.read_sql(text(sql), conn, params={"h": forecast_hour, "sc": int(scenario_cm)})
 
 
 # --- shelters (Stage 11) -------------------------------------------------------

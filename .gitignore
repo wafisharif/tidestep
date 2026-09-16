@@ -9,3 +9,6 @@ __pycache__/
 .venv/
 .ipynb_checkpoints/
 .DS_Store
+data/replay/
+.pytest_cache/
+.coverage

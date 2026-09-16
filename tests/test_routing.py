@@ -22,8 +22,8 @@ def square_graph():
 
 class FakeDB:
     def __init__(self, unsafe): self.unsafe = unsafe
-    def unsafe_edges(self, engine, hour, profile): return self.unsafe
-    def edge_hazard(self, engine, hour):
+    def unsafe_edges(self, engine, hour, profile, scenario_cm=0): return self.unsafe
+    def edge_hazard(self, engine, hour, scenario_cm=0):
         return pd.DataFrame([{"u": u, "v": v, "key": k, "depth_cm": 40} for u, v, k in self.unsafe])
 
 
@@ -33,10 +33,10 @@ class FakeDBByHour:
         self.unsafe_by_hour = unsafe_by_hour
         self.depth_cm = depth_cm
 
-    def unsafe_edges(self, engine, hour, profile):
+    def unsafe_edges(self, engine, hour, profile, scenario_cm=0):
         return self.unsafe_by_hour.get(hour, set())
 
-    def edge_hazard(self, engine, hour):
+    def edge_hazard(self, engine, hour, scenario_cm=0):
         unsafe = self.unsafe_by_hour.get(hour, set())
         return pd.DataFrame([{"u": u, "v": v, "key": k, "depth_cm": self.depth_cm}
                              for u, v, k in unsafe])
@@ -94,10 +94,10 @@ class FakeDBWithHavens:
         self.safe_nodes = safe_nodes
         self.depth_cm = depth_cm
 
-    def unsafe_edges(self, engine, hour, profile):
+    def unsafe_edges(self, engine, hour, profile, scenario_cm=0):
         return self.unsafe_by_hour.get(hour, set())
 
-    def edge_hazard(self, engine, hour):
+    def edge_hazard(self, engine, hour, scenario_cm=0):
         unsafe = self.unsafe_by_hour.get(hour, set())
         return pd.DataFrame([{"u": u, "v": v, "key": k, "depth_cm": self.depth_cm}
                              for u, v, k in unsafe])
@@ -285,11 +285,11 @@ class StrictHourDB:
     def __init__(self, max_hour: int):
         self.max_hour = max_hour
 
-    def unsafe_edges(self, engine, hour, profile):
+    def unsafe_edges(self, engine, hour, profile, scenario_cm=0):
         assert hour <= self.max_hour, f"requested hour {hour} beyond forecast horizon"
         return set()
 
-    def edge_hazard(self, engine, hour):
+    def edge_hazard(self, engine, hour, scenario_cm=0):
         assert hour <= self.max_hour, f"requested hour {hour} beyond forecast horizon"
         return pd.DataFrame(columns=["u", "v", "key", "depth_cm"])
 
@@ -320,11 +320,11 @@ class CountingDB(FakeDBByHour):
         self.unsafe_calls: list[int] = []
         self.hazard_calls: list[int] = []
 
-    def unsafe_edges(self, engine, hour, profile):
+    def unsafe_edges(self, engine, hour, profile, scenario_cm=0):
         self.unsafe_calls.append(hour)
         return super().unsafe_edges(engine, hour, profile)
 
-    def edge_hazard(self, engine, hour):
+    def edge_hazard(self, engine, hour, scenario_cm=0):
         self.hazard_calls.append(hour)
         return super().edge_hazard(engine, hour)
 

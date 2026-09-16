@@ -14,7 +14,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
-from tidestep import dem as demmod, floodfill, hazard, segments, streets  # noqa: E402
+from tidestep import config, dem as demmod, floodfill, hazard, segments, streets  # noqa: E402
 
 DATA = demmod.DATA_DIR
 
@@ -60,8 +60,15 @@ def main():
     seg_path = DATA / "segments.gpkg"
     if seg_path.exists():
         segs = gpd.read_file(seg_path)
+        if "grade_pct" not in segs.columns:
+            # segments.gpkg predates the wheelchair profile: rebuild once so
+            # the running grade is available
+            print("segments.gpkg has no grade_pct column: rebuilding segments")
+            segs = segments.build_segments(edges, dem_path)
+            segs.to_file(seg_path, driver="GPKG")
     else:
         segs = segments.build_segments(edges, dem_path)
+        segs.to_file(seg_path, driver="GPKG")
     segs = refresh_near_inlet(segs, water, seg_path)
     n_off = segs["ground_m"].isna().sum()
     print(f"{len(segs)} segments, {n_off} off-DEM, {segs['near_inlet'].sum()} near inlet "
@@ -71,8 +78,13 @@ def main():
     print(f"seed pixels: {seeds.sum()}")
 
     wl = pd.read_csv(DATA / "water_levels.csv", index_col=0, parse_dates=True)["ofs_navd88_m"]
-    table = hazard.hazard_table(segs, dem, seeds, wl)
+    table = hazard.hazard_table(segs, dem, seeds, wl,
+                                scenarios_cm=tuple(config.SLR_SCENARIOS_CM))
     table.to_csv(DATA / "hazard.csv", index=False)
+    for sc in config.SLR_SCENARIOS_CM[1:]:
+        peak = table[table.scenario_cm == sc].groupby("forecast_hour")["flooded"].sum().max()
+        print(f"scenario +{sc} cm: up to {peak} flooded segments in one hour")
+    table = table[table.scenario_cm == 0]
     summary = table.groupby("valid_time").agg(
         wl_m=("water_level_m", "first"), flooded=("flooded", "sum"),
         unsafe_child=("safe_child", lambda s: (~s).sum()),

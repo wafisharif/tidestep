@@ -136,8 +136,9 @@ def find_chokepoints(G: "nx.MultiDiGraph", engine, profile: str = "adult") -> li
                 SELECT COALESCE(MAX(h.depth_cm), 0) AS max_depth_cm,
                        COUNT(DISTINCT h.forecast_hour) FILTER (WHERE NOT h.{col}) AS hours_unsafe
                 FROM segments s JOIN hazard h USING (segment_id)
-                WHERE (s.u = :u AND s.v = :v AND s.key = :k)
-                   OR (s.u = :v AND s.v = :u AND s.key = :k)
+                WHERE h.scenario_cm = 0
+                  AND ((s.u = :u AND s.v = :v AND s.key = :k)
+                    OR (s.u = :v AND s.v = :u AND s.key = :k))
             """), {"u": u, "v": v, "k": key}).one()
             hours_unsafe = int(row.hours_unsafe or 0)
             results.append(Chokepoint(

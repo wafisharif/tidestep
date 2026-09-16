@@ -1,5 +1,9 @@
-# Stage 4: PostGIS. Start with `docker compose up -d`; stop with `docker compose down`.
-# Data persists in the named volume between restarts.
+# Whole app in two containers.
+#   docker compose up -d db          # PostGIS only (developing with a local python)
+#   docker compose up -d             # PostGIS + API/web app on http://localhost:8000
+#   docker compose run --rm api python scripts/hourly_update.py   # one refresh
+# data/ (DEM, street graph, segments) is generated on the host by
+# scripts/fetch_all.py + scripts/build_hazard.py and mounted read-write.
 services:
   db:
     image: postgis/postgis:16-3.4
@@ -12,5 +16,25 @@ services:
       - "5432:5432"
     volumes:
       - tidestep-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tidestep"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  api:
+    build: .
+    container_name: tidestep-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://tidestep:tidestep@db:5432/tidestep
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
 volumes:
   tidestep-pgdata:

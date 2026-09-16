@@ -250,3 +250,57 @@ alert can read "floods starting around 4:00 PM today" ahead of time.
   features with real test coverage; neither has a "did this match a
   real historical case" validation pass the way the core flood model
   does.
+
+## Added 2026-09-15
+
+### Street-level validation shows a ~0.2 m conservative bias on Shore Road
+
+`docs/VALIDATION.md` compares the model with streets that NWS and the press
+documented as flooded. The 2022-12-23 Shore Road closure is reproduced on
+the exact Main Street–Mill Pond Road stretch, but the model needs about
+2.05 m NAVD88 at the gauge before Shore Road floods, while NWS records
+minor flooding there from 1.83 m. Two causes, neither modeled: wind setup
+inside Manhasset Bay raises the water at the Port Washington shore above
+what the Kings Point gauge (at the bay mouth) reads, and segment elevation
+is sampled on the OSM road centerline, which sits above the seawall-side
+edge where water first enters. Practical effect: at levels between NWS
+minor stage and about 0.2 m above it, the app under-warns on bay-head
+streets. The gauge-level check in `scripts/validate_stage9.py` cannot see
+this because it compares the model to its own input.
+
+### Sea-level-rise scenarios are a flat offset
+
+The +30/+60/+100 cm scenarios add a constant to every hour's water level.
+That ignores that higher mean sea level also changes tidal range,
+marsh/shoreline position, and the datum itself; the DEM is today's
+terrain, and seawall or road-raising projects (the Shore Road seawall
+replacement announced in 2024) are not represented. The offsets are
+rounded values from the NOAA 2022 Interagency Sea Level Rise Technical
+Report's Intermediate scenario for the New York region, not its gridded
+values, and the years attached to them are approximate.
+
+### Wheelchair thresholds are assumptions, not published limits
+
+The 0.15 m depth limit is derived from caster geometry (a manual chair's
+front casters are 75–150 mm; water at hub height stalls the chair and
+hides curb cuts and drain openings). It is not from the flood-safety
+literature that gives the child/adult/vehicle limits, because that
+literature does not cover wheelchair users. The 8.33 % grade limit is the
+ADA accessible-route running-slope maximum, applied to the segment's
+end-to-end DEM grade, which misses short steep curb ramps inside a
+segment and does not model cross-slope, surface type, or missing curb
+cuts. Routing treats every non-stair pedestrian way as usable, which
+overstates what a real sidewalk network allows.
+
+### Historical replay uses the gauge, not the day's wind
+
+A replayed day uses the observed water level at Kings Point, so it
+inherits the bay-setup bias above, and it uses the current DEM and street
+network, not the ones that existed on that date.
+
+### NWS alerts are informational
+
+The banner shows whatever alert api.weather.gov has active for the gauge
+point. It is fetched every 10 minutes and served from cache; if the NWS API
+is unreachable the last result is kept. The app does not change its model
+output based on the alert.

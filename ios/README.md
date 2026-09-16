@@ -148,3 +148,12 @@ but true web-parity only ever required the screens now built above.
   — routes are set entirely by tapping the map, matching the web
   frontend's UX exactly. Worth adding `CoreLocation` for "start from where
   I am" as a nice-to-have, not required for the core demo.
+
+## Not yet in the iOS client (added to the backend 2026-09-15)
+
+The wheelchair profile, sea-level-rise scenarios (`slr_cm`), historical
+replay (`/api/replay/...`) and the NWS alert banner (`/api/alerts`) exist
+in the API and web app but have no iOS UI yet. The new JSON fields
+(`safe_wheelchair`, `grade_pct`, `scenario_cm`) are additive, so the
+existing `Codable` models keep decoding; `Profile` will need a
+`wheelchair` case when that screen is built.

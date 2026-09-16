@@ -195,7 +195,7 @@ struct ContentView: View {
                                 .font(.caption2)
                         }
                         let nUnsafe = a.hours.filter { !$0.safe }.count
-                        Text(nUnsafe > 0 ? "Safe to leave now → +24h · unsafe \(nUnsafe) of \(a.hours.count) hours"
+                        Text(nUnsafe > 0 ? "Safe to leave now → +\(a.hours.count)h · unsafe \(nUnsafe) of \(a.hours.count) hours"
                                           : "Safe to leave now → +24h · safe the whole window")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
@@ -433,7 +433,7 @@ struct ContentView: View {
                 Button(vm.isPlaying ? "pause" : "play") { vm.togglePlay() }
                     .font(.caption2)
                 Spacer()
-                Text(vm.hours.last.flatMap { formatted($0.date) } ?? "+24h").font(.caption2)
+                Text(vm.hours.last.flatMap { formatted($0.date) } ?? "+36h").font(.caption2)
             }
         }
         .padding(10)

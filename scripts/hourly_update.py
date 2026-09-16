@@ -27,7 +27,7 @@ import geopandas as gpd  # noqa: E402
 import osmnx as ox  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from tidestep import coops, db, floodfill, hazard, routing, streets  # noqa: E402
+from tidestep import config, coops, db, floodfill, hazard, routing, streets  # noqa: E402
 from tidestep import dem as demmod  # noqa: E402
 
 DATA = demmod.DATA_DIR
@@ -86,9 +86,11 @@ def main():
     segs = gpd.read_file(DATA / "segments.gpkg")
     water = gpd.read_file(streets.WATER_PATH) if streets.WATER_PATH.exists() else None
     seeds = floodfill.build_seed_mask(dem, transform, water, meta["crs"])
-    table = hazard.hazard_table(segs, dem, seeds, wl["ofs_navd88_m"])
+    table = hazard.hazard_table(segs, dem, seeds, wl["ofs_navd88_m"],
+                                scenarios_cm=tuple(config.SLR_SCENARIOS_CM))
     table.to_csv(DATA / "hazard.csv", index=False)
-    print(f"hazard: {table.flooded.sum()} flooded segment-hours")
+    print(f"hazard: {int(table[table.scenario_cm == 0].flooded.sum())} flooded segment-hours "
+          f"(+{len(config.SLR_SCENARIOS_CM) - 1} SLR scenarios)")
 
     # 3. store
     engine = db.get_engine()
@@ -113,8 +115,12 @@ def main():
                         f"these points at all, flooding aside — check the app for a "
                         f"different start/end point.")
             elif win.first_unsafe_hour == 0:
-                body = (f"TideStep: the usual path for {label} is flooded right now "
-                        f"(up to {win.max_depth_cm} cm, water level "
+                # for the wheelchair profile "unsafe" can also mean a grade
+                # above the ADA limit, which is not a flood at all
+                why = ("has water or a grade above 8.3 % on it right now"
+                       if r["profile"] == "wheelchair" else "is flooded right now")
+                body = (f"TideStep: the usual path for {label} {why} "
+                        f"(water up to {win.max_depth_cm} cm, gauge level "
                         f"{wl.ofs_navd88_m.iloc[0]:.2f} m NAVD88 at Kings Point). "
                         f"Check the app for a safe detour.")
             else:
