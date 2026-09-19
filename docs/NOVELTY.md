@@ -274,6 +274,98 @@ tool nobody had packaged this way for this problem.
     failure — verified directly by tests that force each of those cases
     (`tests/test_routing.py`'s shelter-preference tests) rather than just
     asserting the happy path.
+14. **Sea-level-rise scenarios on the same street-level model, not a
+    separate tool.** Every feature above answers "what will happen," using
+    today's mean sea level. `tidestep/hazard.py`'s `hazard_table()` can
+    also be asked for `scenarios_cm=(0, 30, 60, 100)` — the NOAA 2022 Sea
+    Level Rise Technical Report's Intermediate-scenario offsets for the
+    New York region, roughly 2050/2070/2100 — applied as a constant
+    addition to every forecast water level before the same
+    connected-flood-fill runs, tagged in a `scenario_cm` column through
+    the database schema, the hazard queries, and the router
+    (`Router.route(..., scenario_cm=...)`). This is the same difference
+    CoFIS's "pick a hypothetical water level" scenario mode has over a
+    single-elevation map, but built the other way around: TideStep starts
+    from a live hour-by-hour forecast (item 1) and layers climate
+    scenarios on top of it, rather than only ever showing a scenario.
+    A judge can watch Shore Road go from a handful of flooded segments
+    today to a materially larger stretch at +100 cm on the exact same map,
+    with the same street-level, per-profile detail as the current
+    forecast — turning "sea level rise will affect Long Island" into
+    "sea level rise will close this specific stretch of this specific
+    road."
+15. **A wheelchair profile the depth-only literature doesn't cover.** The
+    child/adult/vehicle thresholds (item in the one-sentence version above)
+    come from FD2321 and UNSW WRL, neither of which addresses wheelchair
+    users. Rather than silently reusing the child threshold, TideStep
+    states the gap and fills it with an engineering-reasoned value: a
+    0.15 m still-water depth limit sized to manual-chair caster geometry
+    (documented as an assumption, not a citation, in
+    `tidestep/config.py` and `docs/LIMITATIONS.md`), plus a second,
+    independent failure mode depth alone can't express — grade. Every
+    segment now carries a `grade_pct` sampled from the DEM
+    (`tidestep/segments.py`), and `hazard.classify()` marks a segment
+    permanently unsafe for the wheelchair profile if it exceeds the ADA
+    Standards for Accessible Design running-slope limit (8.33%),
+    regardless of whether it is flooded — a wet ADA-compliant ramp and a
+    bone-dry staircase both correctly fail, for different reasons, under
+    the same profile. `Router.edge_allowed()` also excludes stairs
+    outright for this profile. This is the kind of accessibility
+    consideration a flood-hazard map for the general public routinely
+    skips, not because it's hard to model, but because it requires
+    treating "safe" as person-specific down to a mobility device, which is
+    exactly the street-level-and-per-person premise this project is built
+    on (see the one-sentence version).
+16. **Historical replay: the same model run on a real day's actual
+    weather, not just the synthetic demo.** `tidestep/replay.py` and
+    `/api/replay/{date}/...` re-run the identical flood-fill and hazard
+    pipeline against CO-OPS's *observed* (not forecast) water levels for
+    any past calendar day, with results cached to disk so a chosen date
+    only needs to be computed once. This does two things at once: it is
+    the demo-video fallback that doesn't depend on a real king tide
+    happening to occur during recording (`docs/STATUS.md`'s "To do" list
+    names 2022-12-23, the day Shore Road actually closed), and it is the
+    mechanism behind item 17's validation — the same code path a viewer
+    watches in a demo is the code path that was checked against
+    documented street closures, not two different implementations that
+    happen to agree.
+17. **Street-level validation against documented real flooding, not just
+    a gauge-level correlation.** `scripts/validate_stage9.py` already
+    checked the model's flooded-segment count against the Kings Point
+    gauge's own observed water level (r²=0.94 across a 30-day sample,
+    100% sensitivity on real NWS-minor-or-higher days — see
+    `docs/LIMITATIONS.md`), but that check compares the model to its own
+    input, so a high correlation is partly expected by construction.
+    `scripts/validate_streets.py` is the independent check: it takes
+    specific streets that NWS's own Kings Point impact catalog and a
+    Patch news report say flooded on specific documented dates, runs the
+    historical-replay pipeline (item 16) at each documented peak, and
+    checks whether the model actually floods that named street. Results,
+    regenerated from `docs/validation/ground_truth.csv` and committed as
+    `docs/VALIDATION.md`: 5 of 9 documented street-flooding reports
+    reproduced, 4 of 4 negative controls (a normal high tide) correctly
+    kept dry, and the 2022-12-23 Shore Road closure reproduced on the
+    exact Main Street–Mill Pond Road stretch the closure notice named, not
+    just as a yes/no. The honest part, stated in `docs/validation/notes.md`
+    and `docs/VALIDATION.md` rather than left for a judge to find: the
+    model is about 0.2 m conservative on Shore Road specifically, for two
+    identified, undramatic reasons (the gauge sits at the bay mouth and
+    doesn't see Port Washington's wind setup; segment elevation is sampled
+    on the road centerline, above the seawall-side edge where water first
+    enters) — a real result with a quantified bias, not a curated set of
+    hits.
+18. **A live official-forecast comparison sits next to the model, so a
+    judge can check TideStep's honesty in real time.** `tidestep/nws.py`
+    pulls api.weather.gov's active alerts for the gauge location
+    (`/api/alerts`, cached 10 minutes, never raises — a network failure
+    falls back to the last good result rather than blanking the banner)
+    and surfaces whatever coastal-flood advisory or warning NWS currently
+    has in effect. This isn't a feature TideStep needs to function; it's
+    a transparency choice — the official warning and TideStep's
+    street-level forecast are both downstream of the same water, so
+    showing them side by side lets a user, or a judge, see directly
+    whether the two agree, rather than asking them to trust a claim of
+    agreement made in a README.
 
 ## What TideStep does *not* claim
 

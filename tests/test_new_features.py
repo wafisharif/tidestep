@@ -8,7 +8,7 @@ import pytest
 import geopandas as gpd
 from shapely.geometry import LineString
 
-from tidestep import config, hazard, nws, replay, routing
+from tidestep import config, hazard, nws, replay, routing, streets
 from tests.test_floodmodel import make_dem   # synthetic beach / ridge / basin DEM
 
 
@@ -161,6 +161,190 @@ def test_nws_alerts_never_raise(monkeypatch):
     out = nws.active_alerts()
     assert out["alerts"] == [] and "offline" in out["error"]
     nws.clear_cache()
+
+
+def test_nws_alerts_falls_back_to_stale_cache_on_refresh_failure(monkeypatch):
+    """A refresh that fails AFTER a good fetch already populated the cache
+    must keep serving the last good alerts (with ``error`` set), not go
+    back to an empty list -- an outage shouldn't make a real active alert
+    disappear from the banner."""
+    nws.clear_cache()
+    good_payload = {"features": [
+        {"properties": {"id": "a", "event": "Coastal Flood Advisory", "headline": "still active"}},
+    ]}
+    calls = []
+
+    def flaky_get(url, params, headers, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            return _Resp(good_payload)
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(nws.requests, "get", flaky_get)
+    # max_age_s=0 means the cache is always treated as expired, so the
+    # second call actually re-attempts the fetch instead of short-circuiting
+    first = nws.active_alerts(max_age_s=0)
+    assert first["error"] is None and len(first["alerts"]) == 1
+
+    second = nws.active_alerts(max_age_s=0)
+    assert len(calls) == 2
+    assert second["alerts"] == first["alerts"]           # stale data kept, not wiped
+    assert second["coastal_alerts"] == first["coastal_alerts"]
+    assert second["error"] is not None and "network down" in second["error"]
+    nws.clear_cache()
+
+
+# --- replay: load_inputs / observed_day / replay_day caching -------------------
+# The tests above cover risk_features/hours_summary/parse_date on
+# hand-built DataFrames (no filesystem). These cover the parts of
+# replay.py that touch disk and the network boundary (coops.fetch_observed),
+# which is why the module sat at 62% before this pass: load_inputs(),
+# observed_day(), and replay_day()'s cache read/write paths were only
+# exercised end-to-end via the live API, never in the test suite. Built on
+# the same synthetic-DEM-plus-one-road fixture test_floodmodel.py already
+# established, so nothing here depends on the real data/ directory.
+
+def test_replay_observed_day_converts_local_midnight_to_utc(monkeypatch):
+    """observed_day() must ask CO-OPS for America/New_York midnight, not
+    UTC midnight -- Kings Point is UTC-5 (EST) in December, so the request
+    should start at 05:00 UTC, not 00:00 UTC."""
+    captured = {}
+
+    def fake_fetch_observed(start_utc, hours):
+        captured["start_utc"] = start_utc
+        captured["hours"] = hours
+        return pd.Series([1.0], index=pd.DatetimeIndex([start_utc]), name="wl_navd88_m")
+
+    monkeypatch.setattr(replay.coops, "fetch_observed", fake_fetch_observed)
+    out = replay.observed_day(datetime(2022, 12, 23))
+    assert captured["hours"] == 24
+    assert captured["start_utc"].hour == 5 and captured["start_utc"].tzinfo is not None
+    assert len(out) == 1
+
+
+def _write_replay_inputs(tmp_path):
+    """A synthetic DEM + segments.gpkg on disk, laid out the way
+    load_inputs() expects to find them under DATA_DIR."""
+    from tidestep import segments as segmod
+    path, _, tr = make_dem(tmp_path)
+
+    def lonlat(col, row):
+        return (tr.c + (col + 0.5) * tr.a, tr.f + (row + 0.5) * tr.e)
+
+    road = LineString([lonlat(12, 50), lonlat(95, 50)])
+    edges = gpd.GeoDataFrame({"u": [1], "v": [2], "key": [0], "osmid": [1],
+                              "highway": ["residential"], "name": ["Shore Rd"],
+                              "length": [83.0], "geometry": [road]}, crs=4326)
+    segs = segmod.build_segments(edges, path)
+    segs["near_inlet"] = False
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "dem_1m.tif").write_bytes(path.read_bytes())
+    segs.to_file(data_dir / "segments.gpkg", driver="GPKG")
+    return data_dir
+
+
+def test_replay_load_inputs_reads_dem_and_segments_once(tmp_path, monkeypatch):
+    data_dir = _write_replay_inputs(tmp_path)
+    monkeypatch.setattr(replay, "DATA_DIR", data_dir)
+    monkeypatch.setattr(replay, "REPLAY_DIR", data_dir / "replay")
+    monkeypatch.setattr(streets, "WATER_PATH", data_dir / "no_such_water.gpkg")
+    replay._inputs.clear()
+    replay._tables.clear()
+
+    inp = replay.load_inputs()
+    assert set(inp) == {"dem", "seeds", "segments", "crs"}
+    assert len(inp["segments"]) > 0
+    assert inp["dem"].shape == inp["seeds"].shape
+
+    # a second call without force=True must reuse the same dict, not reload
+    # from disk -- delete the backing files and confirm it still works
+    (data_dir / "dem_1m.tif").unlink()
+    assert replay.load_inputs() is inp
+
+
+def test_replay_day_caches_to_disk_and_memory_and_skips_recompute(tmp_path, monkeypatch):
+    data_dir = _write_replay_inputs(tmp_path)
+    monkeypatch.setattr(replay, "DATA_DIR", data_dir)
+    monkeypatch.setattr(replay, "REPLAY_DIR", data_dir / "replay")
+    monkeypatch.setattr(streets, "WATER_PATH", data_dir / "no_such_water.gpkg")
+    replay._inputs.clear()
+    replay._tables.clear()
+
+    date = datetime(2022, 12, 23)
+    calls = []
+
+    def fake_observed_day(d):
+        calls.append(d)
+        t = datetime(d.year, d.month, d.day, 12, tzinfo=replay.LOCAL_TZ)
+        return pd.Series([0.9], index=pd.DatetimeIndex([t]), name="wl_navd88_m")
+
+    monkeypatch.setattr(replay, "observed_day", fake_observed_day)
+    assert replay.cached_days() == []
+
+    table = replay.replay_day(date)   # use_cache=True, water_levels=None (default)
+    assert len(calls) == 1
+    assert not table.empty and "flooded" in table.columns
+    cache_file = data_dir / "replay" / "2022-12-23.csv"
+    assert cache_file.exists()
+    assert replay.cached_days() == ["2022-12-23"]
+
+    # second call: served straight from the in-memory _tables dict, so
+    # observed_day() is never invoked again
+    same = replay.replay_day(date)
+    assert len(calls) == 1
+    assert same is table
+
+    # third call: drop the in-memory cache but keep the CSV -- must be
+    # read back from disk rather than recomputed
+    replay._tables.clear()
+    from_disk = replay.replay_day(date)
+    assert len(calls) == 1
+    pd.testing.assert_frame_equal(
+        from_disk.reset_index(drop=True), table.reset_index(drop=True), check_dtype=False)
+
+
+def test_replay_day_with_explicit_water_levels_bypasses_cache(tmp_path, monkeypatch):
+    """A validation run (scripts/validate_streets.py) passes water_levels
+    directly and never wants the result written to data/replay/ -- that
+    directory is for the "replay a real observed day" feature, not for
+    arbitrary documented peaks."""
+    data_dir = _write_replay_inputs(tmp_path)
+    monkeypatch.setattr(replay, "DATA_DIR", data_dir)
+    monkeypatch.setattr(replay, "REPLAY_DIR", data_dir / "replay")
+    monkeypatch.setattr(streets, "WATER_PATH", data_dir / "no_such_water.gpkg")
+    replay._inputs.clear()
+    replay._tables.clear()
+
+    date = datetime(2022, 12, 23)
+    wl = replay.water_levels_from_peak(date, 0.9)
+    assert len(wl) == 1 and wl.index[0].hour == 12
+
+    table = replay.replay_day(date, water_levels=wl)
+    assert not table.empty
+    assert not (data_dir / "replay").exists()          # nothing cached to disk
+    assert "2022-12-23" not in replay._tables            # nor in memory
+
+
+def test_replay_day_raises_on_empty_observed_series(tmp_path, monkeypatch):
+    """A CO-OPS gap (station offline, data not yet published) must surface
+    as a clear error, not silently build an empty hazard table."""
+    data_dir = _write_replay_inputs(tmp_path)
+    monkeypatch.setattr(replay, "DATA_DIR", data_dir)
+    monkeypatch.setattr(replay, "REPLAY_DIR", data_dir / "replay")
+    monkeypatch.setattr(streets, "WATER_PATH", data_dir / "no_such_water.gpkg")
+    monkeypatch.setattr(replay, "observed_day", lambda d: pd.Series([], dtype="float64"))
+    replay._inputs.clear()
+    replay._tables.clear()
+
+    with pytest.raises(ValueError, match="no observed water levels"):
+        replay.replay_day(datetime(2022, 12, 23))
+
+
+def test_replay_cached_days_empty_when_directory_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(replay, "REPLAY_DIR", tmp_path / "never_created")
+    assert replay.cached_days() == []
 
 
 # --- street-level validation helpers ------------------------------------------
