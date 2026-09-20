@@ -1,6 +1,6 @@
 # Stage 9b — validation against documented street flooding
 
-Generated 2026-09-15 12:00 by `scripts/validate_streets.py` from `docs/validation/ground_truth.csv`.
+Generated 2026-09-20 20:20 by `scripts/validate_streets.py` from `docs/validation/ground_truth.csv`.
 
 **Reported flooded streets caught: 5 / 9.** Negative controls (normal high tide, MHHW) kept dry: 4 / 4.
 

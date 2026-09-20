@@ -86,21 +86,100 @@ def _chokepoint_topology(G: "nx.MultiDiGraph", profile: str) -> list[tuple[int, 
     """[(u, v, key, nodes_isolated), ...] for every TRUE single point of
     failure -- a bridge edge in the collapsed simple graph that also has
     no redundant parallel way directly connecting the same two nodes.
-    Pure topology; no hazard data involved yet."""
+    Pure topology; no hazard data involved yet.
+
+    Runs in O(|V| + |E|) total, not O(bridges x (|V| + |E|)). An earlier
+    version recomputed a fresh connected-component search -- preceded by
+    a full ``S.copy()`` -- for every individual bridge, which is exactly
+    right on the small hand-built graphs in tests/test_resilience.py (at
+    most one or two bridges) but was never exercised at real scale until
+    this project's real 55,577-segment Kings Point street graph was
+    finally loaded end to end: that graph alone has 2,027 bridges (a
+    normal suburban network has a lot of single-access/dead-end streets),
+    so the old version did 2,027 full-graph copies plus 2,027 BFS
+    traversals -- several minutes for one /api/network/chokepoints
+    request. See docs/CHANGELOG.md for how this was found and measured.
+
+    The fix uses the standard "bridge tree" construction: contracting
+    every 2-edge-connected component (``nx.k_edge_components(S, k=2)`` --
+    a maximal subgraph with no bridges inside it) down to a single point
+    turns the whole graph into a TREE whose edges are exactly the
+    bridges of S. Removing one tree edge splits the tree in two, and a
+    single post-order pass over the tree (computing each subtree's total
+    original-node weight) gives every bridge's isolation size in one
+    linear-time traversal instead of one search per bridge. S can have
+    more than one connected component (e.g. a profile-filtered subgraph
+    that splits the map into separate islands), so this is a forest, not
+    one tree -- handled by rooting a new traversal at every
+    not-yet-visited node.
+    """
     S = _collapse_to_simple_graph(G, profile)
     if S.number_of_nodes() == 0:
         return []
-    total_nodes = S.number_of_nodes()
-    out = []
+
+    components = list(nx.k_edge_components(S, k=2))
+    comp_of: dict[int, int] = {}
+    comp_size: list[int] = []
+    for i, comp in enumerate(components):
+        comp_size.append(len(comp))
+        for n in comp:
+            comp_of[n] = i
+
+    # The bridge tree: one tree-node per 2-edge-connected component, one
+    # tree-edge per bridge of S, tagged with the real (a, b) endpoints so
+    # the parallel-way filter below can still look up S[a][b]["keys"].
+    tree = nx.Graph()
+    tree.add_nodes_from(range(len(components)))
+    bridge_for_tree_edge: dict[frozenset, tuple[int, int]] = {}
     for a, b in nx.bridges(S):
-        keys = S[a][b]["keys"]
-        if len(keys) != 1:
-            continue  # a parallel way survives losing this one -- not a chokepoint
-        H = S.copy()
-        H.remove_edge(a, b)
-        comp_a = nx.node_connected_component(H, a)
-        isolated = min(len(comp_a), total_nodes - len(comp_a))
-        out.append((a, b, next(iter(keys)), isolated))
+        ca, cb = comp_of[a], comp_of[b]
+        tree.add_edge(ca, cb)
+        bridge_for_tree_edge[frozenset((ca, cb))] = (a, b)
+
+    subtree_weight = list(comp_size)  # mutated in place during the walk below
+    out = []
+    visited = [False] * len(components)
+    for start in range(len(components)):
+        if visited[start]:
+            continue
+        # iterative post-order DFS over this tree component, so a subtree's
+        # weight (sum of comp_size over every node under it) is known
+        # before its parent needs it
+        parent = {start: None}
+        order = [start]
+        stack = [start]
+        visited[start] = True
+        while stack:
+            node = stack.pop()
+            for nbr in tree[node]:
+                if not visited[nbr]:
+                    visited[nbr] = True
+                    parent[nbr] = node
+                    order.append(nbr)
+                    stack.append(nbr)
+        for node in reversed(order):
+            p = parent[node]
+            if p is not None:
+                subtree_weight[p] += subtree_weight[node]
+        # `start` is this forest-tree's root, so subtree_weight[start] is now
+        # this LOCAL component's total node count -- the denominator every
+        # bridge in this tree must split against. Using the whole graph's
+        # node count here instead (as an earlier draft of this fix did)
+        # would be wrong whenever S has more than one connected component:
+        # a bridge can only isolate nodes that were reachable through it in
+        # the first place, never nodes sitting in an entirely separate,
+        # already-unreachable island elsewhere in the graph.
+        local_total = subtree_weight[start]
+        for node in order:
+            p = parent[node]
+            if p is None:
+                continue
+            a, b = bridge_for_tree_edge[frozenset((node, p))]
+            keys = S[a][b]["keys"]
+            if len(keys) != 1:
+                continue  # a parallel way survives losing this one -- not a chokepoint
+            isolated = min(subtree_weight[node], local_total - subtree_weight[node])
+            out.append((a, b, next(iter(keys)), isolated))
     return out
 
 

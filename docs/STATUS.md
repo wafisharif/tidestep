@@ -7,12 +7,19 @@ page is only what is true now and what is next.
 
 All ten pipeline stages plus the additions listed below run end to end on
 real data for the Kings Point / Manhasset Bay study area (55,577 road
-segments, 1 m DEM). 266 tests pass with `DATABASE_URL` set to a reachable
-Postgres (0 skipped, 99% package coverage, `tidestep/api.py` at 100%) —
-that includes the PostGIS integration/db suite, which now actually runs
-in this sandbox (see `CHANGELOG.md`'s seventeenth pass); without a DB
-reachable, 50 of those skip and 216 still pass. CI runs them on every
-push (`.github/workflows/ci.yml`).
+segments, 1 m DEM) — confirmed 2026-09-20 with the real dataset actually
+loaded and exercised live (not just the synthetic fixture), which is how
+the chokepoints performance bug below was found. 268 tests pass with
+`DATABASE_URL` set to a reachable Postgres (0 skipped, 99%+ package
+coverage, `tidestep/api.py` at 100%) — that includes the PostGIS
+integration/db suite, which now actually runs in this sandbox (see
+`CHANGELOG.md`'s seventeenth pass); without a DB reachable, 50 of those
+skip and 218 still pass. CI runs them on every push
+(`.github/workflows/ci.yml`). **Running the full suite against a real,
+data-loaded Postgres overwrites that real data with a synthetic fixture
+as a side effect — reload with `python scripts/load_db.py` afterward
+before trusting live API responses** (see `CHANGELOG.md`'s eighteenth
+pass).
 
 | Area | State |
 |---|---|
@@ -52,13 +59,32 @@ push (`.github/workflows/ci.yml`).
 - Fixed a real bug found in the process: `resilience.py`'s chokepoint
   priority score wasn't filtering to `scenario_cm = 0`, so it could mix
   hours-unsafe counts across sea-level-rise scenarios.
+- **The real 55,577-segment Kings Point dataset loaded end to end and
+  exercised live for the first time this project** (previously only run
+  against the synthetic Cove Harbor fixture): found and fixed a genuine
+  multi-minute performance bug in `resilience.py`'s chokepoint topology
+  (O(bridges x graph size) — 2,027 bridges on the real graph — rewritten
+  as an O(|V|+|E|) bridge tree; `/api/network/chokepoints` now answers
+  in ~5 s instead of ~6 min), plus a real multi-component isolation-size
+  bug the rewrite surfaced and fixed along the way. 268 passed / 0
+  skipped. See `CHANGELOG.md`'s eighteenth pass for the full account,
+  including a test-suite gotcha (a full-suite run overwrites real data
+  with the synthetic fixture — reload with `load_db.py` afterward) and
+  why `/api/route/to_safety` currently finds no havens (a 25-hour cached
+  tide forecast, not a code bug — see `LIMITATIONS.md`).
 
 ## To do
 
 1. **Regenerate data on the laptop** after pulling: `python scripts/build_hazard.py`
    (rebuilds `segments.gpkg` once to add `grade_pct`, then all four scenarios,
    ~3 min) and `python scripts/load_db.py` (~2 min). The schema migration
-   is automatic.
+   is automatic. (This exact pipeline was proven end to end against the
+   real data on 2026-09-20, but in the cloud sandbox, not on the laptop
+   itself — its own `data/`/Postgres still need this run.)
+1a. **Fetch a fresh 36 h NOAA tide forecast** from a normal terminal —
+   the laptop's cached one only covers 25 of the 36 hours the app
+   expects, which is why `/api/route/to_safety` currently reports no
+   reachable haven (see `LIMITATIONS.md`).
 2. **Demo footage**: replay `2022-12-23` in the app, or wait for a forecast
    peak above NWS minor stage (1.77 m NAVD88).
 3. **Extend ground truth**: ask Nassau County DPW / Port Washington PD for

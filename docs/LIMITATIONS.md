@@ -304,3 +304,20 @@ The banner shows whatever alert api.weather.gov has active for the gauge
 point. It is fetched every 10 minutes and served from cache; if the NWS API
 is unreachable the last result is kept. The app does not change its model
 output based on the alert.
+
+## Added 2026-09-20
+
+### `route_to_safety` needs the full forecast window loaded, not just the current hour
+
+`always_safe_nodes()` correctly requires an actual hazard row for *every*
+hour from departure through `config.MAX_HOUR` (36 h forecast, so hour 35)
+before calling a node a safe haven — a haven the traveler won't have to
+evacuate again from later the same day, not merely safe this instant. If
+the loaded `hazard` table only covers a shorter window than that (for
+example a cached tide forecast that was only fetched 25 hours ahead), the
+query can never find a segment with a row for every requested hour and
+`/api/route/to_safety` reports no reachable haven at every departure hour
+— confirmed by re-running the identical query against the hours the data
+actually has, which immediately finds thousands of safe nodes. This is
+expected behavior given a short forecast window, not a routing bug; it
+resolves itself the moment a fresh full-length NOAA fetch is loaded.

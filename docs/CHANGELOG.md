@@ -2,6 +2,199 @@
 
 Updated: 2026-09-20
 
+## Done (2026-09-20, eighteenth pass — the seventeenth pass's own
+follow-up item done for real: real Kings Point data loaded and the full
+suite run against it, which surfaced a genuine multi-minute performance
+bug nothing synthetic had ever triggered)
+
+The seventeenth pass's "Uncommitted work" note flagged this as the one
+thing its own 266/266-passing run hadn't proven: "this pass's 238/266
+runs were both against `scripts/dev_seed.py`'s synthetic 'Cove Harbor'
+fixture ... not itself proof the real Kings Point data loads cleanly
+under the now-migrated schema." This pass did exactly that.
+
+**Network egress reconfirmed, worked around the documented way, not
+around the policy.** Both this sandbox's `Bash` and the laptop's
+`device_bash` (a separate bridged Linux VM, not the laptop's real
+Windows shell — confirmed via `/etc/os-release`; its existing `.venv` is
+a Windows-Python build and can't even execute from that shell) are
+blocked by their organization's egress policy from reaching
+`api.tidesandcurrents.noaa.gov`, `prd-tnm.s3.amazonaws.com`,
+`overpass-api.de`, and `api.weather.gov` — all 403 at the proxy, exactly
+as `CLAUDE.md`'s "Environment note" already documents. Per this
+sandbox's own proxy README, that is a policy boundary to report, not
+route around. The laptop already had real data cached from an earlier
+real fetch (`data/dem_1m.tif`, `segments.gpkg`, `shelters.gpkg`,
+`streets.graphml`, `water.gpkg`, a 25-hour `water_levels.csv` from
+2026-09-08), staged into this sandbox — which has the full geospatial +
+Postgres/PostGIS toolchain the laptop's bridged VM does not — and ran
+the real pipeline there: `build_hazard.py` (rebuilding `segments.gpkg`
+once to add `grade_pct`, then `hazard.csv`: **55,577 segments x 25
+hours x 4 SLR scenarios = 5,557,700 rows**, confirmed by both the
+script's own count and a direct `GROUP BY scenario_cm` query) and
+`load_db.py` (55,577 segments / 5,557,700 hazard rows / 28 real OSM
+shelters — 14 schools, 6 community centers, 6 fire stations, 2 police
+stations — loaded into Postgres, checked against the script's printed
+counts). Verified end to end against a live `uvicorn` server: `/api/config`,
+`/api/hours`, `/api/risk`, `/api/route` (a real Denton Road -> Kings
+Point Road trip, 2,416 m), `/api/route?time_aware=true`, and
+`/api/route/advisory` all correct against real data and real
+coordinates picked from actual segment centroids.
+
+**Found the pass's real bug: `GET /api/network/chokepoints` hung for
+minutes against the real graph.** `resilience._chokepoint_topology()`
+looped over every bridge `nx.bridges(S)` found and, for each one, did a
+full `S.copy()` (the entire graph) plus a fresh
+`nx.node_connected_component()` BFS — O(bridges x (|V|+|E|)). On this
+suite's hand-built test graphs (one or two bridges) that's instant; on
+the real Kings Point graph (6,605 nodes / 8,757 edges after collapsing
+to a simple undirected graph) it's **2,027 bridges** — a normal suburban
+network is mostly single-access dead-end streets — each one paying a
+measured ~0.155 s just for `S.copy()`, putting the total at roughly
+5.5-6.75 minutes for one request. Invisible in every prior pass because
+nothing before this one had ever run `find_chokepoints`/
+`chokepoints_geojson` against real, full-sized data — `test_integration.py`
+exercises them against the tiny synthetic Cove Harbor fixture, where a
+handful of bridges hides the complexity entirely.
+
+**Fix: rewrote it as a "bridge tree" construction, O(|V|+|E|) total.**
+`nx.k_edge_components(S, k=2)` contracts every 2-edge-connected
+component to one point, turning the whole graph into a tree (or forest,
+if the profile-filtered subgraph splits into separate islands) whose
+edges are exactly the bridges of S; one iterative post-order DFS per
+forest component then gives every bridge's isolation size in a single
+linear pass instead of one search per bridge. Full docstring and
+reasoning are in `tidestep/resilience.py` itself.
+
+**Caught and fixed a real bug in the rewrite's own first draft** before
+it went anywhere near the real server: the first version compared each
+bridge's split against the *whole graph's* node count instead of its
+own local component's, which is silently correct for a single connected
+graph (this project's real data always is) but wrong the moment a
+graph has more than one island. Caught it with a standalone comparison
+script (`old_chokepoint_topology` preserved verbatim, run against six
+synthetic test graphs of increasing size against the new algorithm) —
+every single-component case matched exactly, but a genuinely
+multi-island case didn't, which sent this to a small hand-traceable
+example instead of guessing: two disconnected paths, `0-1-2-3` (4
+nodes) and `10-11` (2 nodes). The OLD algorithm reports `isolated=3`
+for edge `(2,3)` — `min(3, 6-3)`, comparing against both islands'
+combined 6 nodes — when the only correct answer is `isolated=1` —
+`min(3, 4-3)`, comparing within the 4-node island edge `(2,3)` actually
+sits in. **This is a latent bug in the ORIGINAL algorithm too**, just
+never caught because nothing in this project's real or synthetic data
+was ever genuinely disconnected until this was checked by hand. Fixed
+by capturing each forest-tree's own local total after its own DFS
+completes, rather than one global node count for the whole graph. This
+hand-traced example is now `test_chokepoint_topology_isolation_sizes_are_local_to_each_component`
+in `tests/test_resilience.py`, alongside a new
+`test_chokepoint_topology_runs_in_near_linear_time_on_many_dead_ends`
+(a 50-node ring with 2,000 dead-end spurs, mirroring the real graph's
+shape, asserting both correctness and a 5 s wall-clock budget) so this
+specific performance regression can't silently come back.
+
+**A genuinely destructive gotcha found and worked around during
+verification, worth flagging for future passes**: running the full
+`pytest` suite against `DATABASE_URL` pointed at this real, data-loaded
+Postgres instance **overwrites the real segments/hazard tables** as a
+side effect — `test_integration.py`'s module-scoped `seeded_app` fixture
+calls `dev_seed.build_scenario()` and loads the synthetic 198-segment
+"Cove Harbor" fixture into the exact same tables the real data was in.
+First surfaced as every `chokepoints` feature coming back with a null
+GeoJSON geometry after a full-suite run — traced to the `segments`
+table suddenly holding 198 rows with tiny synthetic node IDs instead of
+55,577 real ones, not a bug in the fix. Reloaded real data with
+`scripts/load_db.py` after every full-suite run this pass (three times
+total) and restarted `uvicorn` each time so its in-process graph/DB
+state matched. This is a real methodological hazard for whoever runs
+`pytest tests/ -q` against a real (not throwaway) database in the
+future — worth a `.env.test` / second database in a later pass, noted
+in "Next" below rather than fixed here, since it's a test-fixture
+design question, not a bug in the code under test.
+
+**Final live benchmark, against correctly-reloaded real data, fresh
+`uvicorn` restart**: `GET /api/network/chokepoints?profile=adult` — **200
+OK in ~5.1 s cold, ~2.8 s warm**, 1,991 chokepoints returned (36
+fewer than the raw 2,027 bridge count — the rest have a genuinely
+redundant parallel way and are correctly filtered out), every feature's
+geometry populated. `vehicle_small` profile: ~2.0 s. Down from an
+estimated 5.5-6.75 minutes.
+
+**Investigated `/api/route/to_safety` returning "no reachable safe
+haven" at hour=1 and hour=7 for a real, verified-good coordinate —
+root-caused as a data-window limitation, not a bug.**
+`config.FORECAST_HOURS = 36` (`MAX_HOUR = 35`), and
+`db.always_safe_nodes()` correctly requires an actual hazard row for
+*every* hour from departure through `MAX_HOUR` before calling a node
+safe. But the laptop's cached `water_levels.csv` (fetched 2026-09-08,
+before this sandbox's own NOAA access was ever cut off) only covers a
+25-hour window, so `hazard.forecast_hour` only ever has values 0-24 —
+querying `always_safe_nodes` for hours 1-35 can never find a segment
+with a row for every one of those 35 hours, so it always returns empty.
+Confirmed the logic itself is correct by re-running the identical query
+against the range the data actually has (hours 1-24): **6,588 safe
+nodes**, immediately. This will resolve itself the moment a fresh 36 h
+NOAA fetch runs from a normal terminal; noted in
+`docs/LIMITATIONS.md` so it isn't mistaken for a routing bug again.
+
+**Re-ran `scripts/validate_streets.py` (Stage 9b, fully offline)**
+against the freshly-rebuilt real `segments.gpkg`/`dem_1m.tif` — same
+result as the documented baseline (5/9 reported-flooded streets hit,
+4/4 negative controls stayed dry, the 2022-12-23 Shore Road closure
+still reproduced on the exact Main St-Mill Pond Rd stretch), confirming
+the `grade_pct` rebuild this pass didn't change flood behavior.
+`docs/VALIDATION.md` regenerated with today's timestamp.
+
+**Test suite, three full runs this pass** (each followed by a real-data
+reload since the suite itself wipes the DB, see above): 268 passed, 0
+skipped, 0 failed each time (266 from the seventeenth pass's baseline +
+the 2 new resilience regression tests). `tests/test_resilience.py`
+alone: 9/9.
+
+**One platform hiccup, transparently handled, not worked around**: a
+~20-minute stretch where `Bash` (beyond trivial builtins) and spawning
+an `Agent` subagent both failed with a generic tool-classifier timeout
+— general infra degradation, isolated by varying paths/commands/flags,
+not anything about this project. Sent a status update, scheduled a
+retry via `send_later`, resumed once it fired and Bash had recovered.
+No progress was fabricated or skipped during the outage.
+
+**Final state:** `DATABASE_URL=postgresql+psycopg://tidestep:tidestep@localhost:5432/tidestep python -m pytest -q` →
+**268 passed, 0 failed**; real data loaded (55,577 segments / 5,557,700
+hazard rows / 28 shelters); `uvicorn` restarted against it;
+`/api/network/chokepoints` confirmed fast (~5 s vs. ~6 min) and correct
+(non-null geometry) against the real graph. Files touched:
+`tidestep/resilience.py` (the O(|V|+|E|) rewrite), `tests/test_resilience.py`
+(2 new tests), `docs/VALIDATION.md` (regenerated), `docs/LIMITATIONS.md`,
+`docs/STATUS.md`, this file. From the laptop, in `tidestep-app`, after
+pulling this file-bridge sync and regenerating data locally per
+`STATUS.md`'s "To do" item 1 (`python scripts/build_hazard.py &&
+python scripts/load_db.py` — this pass ran that pipeline in the cloud
+sandbox against the laptop's cached real inputs, but the laptop's own
+`data/` and Postgres still need the same regeneration to actually serve
+the app there):
+```
+git add tidestep/resilience.py tests/test_resilience.py docs/VALIDATION.md docs/LIMITATIONS.md docs/STATUS.md docs/CHANGELOG.md
+git commit -m "fix: resilience chokepoint topology was O(bridges x graph size) -- 2,027 bridges on the real Kings Point graph meant several minutes per /api/network/chokepoints request; rewrite as an O(|V|+|E|) bridge-tree construction, plus a real multi-component isolation-size bug this surfaced along the way. Verified against real 55,577-segment data end to end."
+git push
+```
+**Coordinate with your teammate before running this** — same shared-`.git`
+caution as every earlier pass's note here.
+
+**Follow-up items from this pass** (folded into the "Next" backlog
+section further down too): give the pytest suite its own database (or a
+transaction-rollback fixture) instead of sharing `DATABASE_URL` with
+whatever real data happens to be loaded — this pass had to reload real
+data three times after full-suite runs silently overwrote it with the
+synthetic fixture; fetch a fresh 36 h NOAA forecast from a normal
+terminal (not this sandbox or the laptop's bridged VM, both blocked) so
+`/api/route/to_safety` has a full data window instead of the current
+25-hour cached one and can actually find reachable havens; regenerate
+`data/` and reload Postgres **on the laptop itself** — this pass proved
+the pipeline and the chokepoints fix against real data in the cloud
+sandbox, but the laptop's own copies are still whatever they were
+before this pass.
+
 ## Done (2026-09-20, seventeenth pass — the test suite finally ran against
 a real database this session, and the resulting coverage gaps got closed
 rigorously instead of chased for a number)
@@ -1662,35 +1855,40 @@ terminal — none of it is blocked on tooling)
    sixteenth-pass "Uncommitted work" section above for the exact steps)
    — this sandbox verified it by contract (tests, syntax/tag-balance
    checks) but has no Docker daemon to click through it live.
-2. **Fetch real shelter data and reload the live DB** (still not yet run
-   for real — open since the twelfth pass):
-   ```
-   python -c "from tidestep import shelters; shelters.fetch_shelters()"
-   python scripts/load_db.py
-   ```
-   The first line hits Overpass for real (schools, hospitals, fire/police
-   stations, community centers in the study bbox) and writes
-   `data/shelters.gpkg`; the second loads segments+hazard+shelters into
-   Postgres in one pass — it now loads shelters automatically if that
-   file exists. Needs `docker compose up -d` first if Postgres isn't
-   already running (this was the error hit the last time `load_db.py`
-   was tried). Sanity-check with
-   `python -c "from tidestep import db; e=db.get_engine(); print(db.shelter_points(e))"`
-   — should print a non-empty list of real building names. This is now
-   the single highest-value thing left to do: everything else on this
-   list either depends on it (step 3, the demo footage in step 4) or is
-   independent of it (the iOS app in step 5).
-3. **Re-run `build_hazard.py`, then `load_db.py` again** (or restart
-   `hourly_update.py`'s cron loop) so the live database reflects every
-   correctness fix from prior passes *and* the shelter table, together.
+2. ~~Fetch real shelter data and reload the live DB~~ — **done, confirmed
+   again this (eighteenth) pass**: 28 real OSM shelters (14 schools, 6
+   community centers, 6 fire stations, 2 police stations) loaded into
+   Postgres alongside the real 55,577-segment/5,557,700-hazard-row data.
+3. ~~Re-run `build_hazard.py`, then `load_db.py` again~~ — **done this
+   (eighteenth) pass, in the cloud sandbox** against the laptop's real
+   cached inputs (both NOAA/USGS/Overpass and the laptop's own bridged
+   shell are blocked from live network access — see that pass's "Done"
+   section). Still needs doing **on the laptop itself** so its own
+   `data/` and Postgres actually reflect this — see that pass's "Done"
+   section for the exact numbers to expect.
 4. Record demo footage: the time slider across a real flood cycle, the
    profile switch showing the same trip flood-blind vs. flood-aware, and
-   "Evacuate to safety" naming an actual shelter building once step 2
-   above has run.
+   "Evacuate to safety" naming an actual shelter building.
 5. iOS app: see `ios/README.md` — Swift source is written and reviewed
    line by line against the real API/DB response shapes, but still has
    never actually compiled — needs a Mac. Still the single biggest
    unverified risk left in the project.
+6. **Give the pytest suite its own database** (or a transaction-rollback
+   fixture) instead of sharing `DATABASE_URL` with whatever real data
+   happens to be loaded — found this (eighteenth) pass: a full-suite run
+   silently overwrites the real `segments`/`hazard` tables with
+   `test_integration.py`'s synthetic "Cove Harbor" fixture via its
+   module-scoped `seeded_app` fixture, so any real-data check has to
+   reload real data (`scripts/load_db.py`) and restart `uvicorn`
+   *after* running tests, every time, or it's silently checking the
+   wrong data.
+7. **Fetch a fresh 36 h NOAA forecast from a normal terminal** (not a
+   sandbox — both this one and the laptop's bridged `device_bash` VM are
+   blocked). The cached `water_levels.csv` only covers 25 of the 36
+   hours `config.FORECAST_HOURS` expects, so `/api/route/to_safety`'s
+   `always_safe_nodes()` query — which correctly requires real coverage
+   for every hour through `MAX_HOUR` — can never find a haven; see the
+   eighteenth pass's "Done" section and `docs/LIMITATIONS.md`.
 
 Feature-work backlog: **empty** as of this pass — every item previously
 listed here (~~stop-order optimization~~, ~~real shelter locations for
@@ -1698,7 +1896,8 @@ listed here (~~stop-order optimization~~, ~~real shelter locations for
 `best_departure`/`multi_stop`/`chokepoints`~~, ~~push
 `route_best_departure()`'s per-hour search down~~) is done; see the
 "Done" sections above. What's left is real-world execution on the
-laptop (items 1-5 above), not new code.
+laptop (items 1, 3-5, 7 above) and one test-infra hardening item
+(item 6), not new code.
 
 Test coverage gap is **done, for real this time** — see the fifteenth-pass
 "Done" section above. Package-wide coverage in this sandbox is now
