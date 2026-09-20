@@ -1,6 +1,116 @@
 # Changelog (pass-by-pass history, moved from STATUS.md on 2026-09-15)
 
-Updated: 2026-09-15
+Updated: 2026-09-20
+
+## Done (2026-09-20, seventeenth pass — the test suite finally ran against
+a real database this session, and the resulting coverage gaps got closed
+rigorously instead of chased for a number)
+
+Confirmed local git state first, same content-diff-against-`origin/main`
+method as every earlier pass (this sandbox never runs `git commit`, so
+its local HEAD is always stale by ref even when the files themselves are
+current) — found zero drift, then synced the sandbox to the teammate's
+latest pushed commits before starting. Found and fixed one real bug
+along the way: `resilience.py`'s chokepoint scoring was missing a
+`scenario_cm = 0` filter, so it could double-count a segment's unsafe
+hours across sea-level-rise scenarios instead of scoring the plain
+forecast alone. Extended `tests/test_new_features.py` with 10 new tests
+closing `nws.py` and `replay.py` to 100% (a stale-cache-on-refresh-failure
+test for the alert banner, plus five for `replay.py`'s local-midnight-to-
+UTC conversion, disk/memory caching, and error paths). Extended
+`docs/NOVELTY.md` with five more evidence-cited items (14–18: SLR
+scenarios, wheelchair profile, historical replay, street-level
+validation, the NWS alert banner) it was missing entirely.
+
+**The actual milestone of this pass: this sandbox has PostgreSQL 16 +
+PostGIS 3.4.2 already installed but nothing this session had ever started
+it**, so all 39 DB-integration tests (`test_db.py`, `test_hourly_update.py`,
+`test_integration.py`) had been silently skipping every single run behind
+`_db_available()`'s `SELECT 1` check — not a code problem, just a service
+never brought up. Started it, confirmed/created the `tidestep`/`tidestep`
+role + database + `postgis` extension, pointed `DATABASE_URL` at it, and
+ran the full suite for the first time all session: 238 passed, 0 skipped,
+0 failed, package coverage 85% → 97%. That's the first genuine end-to-end
+exercise this session of the real PostGIS schema creation, the idempotent
+`MIGRATIONS` block, the primary-key-rebuild-if-needed logic, and every
+real SQL query function in `db.py` — none of which any unit test in the
+suite otherwise touches.
+
+With a live DB finally available, went after the coverage gaps it
+exposed as real, targeted tests rather than as busywork:
+
+- **`tidestep/api.py`: 85% → 100%.** ~20 new tests in `test_api.py` (plus
+  two in `test_integration.py`) closed: the `engine()`/`router()` lazy-
+  singleton caching (nothing else calls through them — the seeded-app
+  test fixture bypasses them by design, setting `api._engine`/`api._router`
+  directly); the root `/` frontend route; `GET /api/alerts`; the entire
+  `/api/replay/*` family (list, hours, risk — including the 400/503/404
+  error-mapping for a bad date, missing server data files, and no
+  observed data for that day); the "no safe route" / "no reachable
+  haven" JSON-200-with-`geometry: null` branches on `/api/route`
+  (both plain and `time_aware`) and `/api/route/to_safety`, which are a
+  deliberate, correct design choice (a real forecast answer, not an
+  error) that nothing exercised; `multi_stop`'s `ValueError`→400 mapping
+  for a genuinely infeasible stop order; `/api/hours`' 404 for a scenario
+  that's a recognized value in `config.SLR_SCENARIOS_CM` but not actually
+  loaded on this server (exercised with a minimal fake-engine test double,
+  since `scripts/dev_seed.py` always loads every configured scenario at
+  once, so the real DB can never produce this state); and — against the
+  real seeded DB — a valid `bbox` on `/api/risk` actually filtering
+  results geographically, which every prior bbox test only ever exercised
+  as the malformed-input 400 path.
+- **`tidestep/db.py`: 90% → 99%.** New tests in `test_db.py`: `get_engine()`'s
+  `DATABASE_URL` env-var fallback (every fixture elsewhere in the suite
+  sidesteps this by calling `create_engine` directly); `load_segments()`
+  defaulting `near_inlet` to `False` when the input GeoDataFrame lacks the
+  column; `segments_geojson()` (used by the replay endpoints, never hit
+  directly against a real DB elsewhere); `always_safe_nodes()`'s profile-
+  validation guard, its empty-`hours` short-circuit, and — the one most
+  worth having — that it correctly excludes a node whose segment is safe
+  at one requested hour but has **no hazard row at all** for another
+  requested hour, rather than vacuously treating a missing row as safe;
+  `shelter_points()`/`nearest_shelter()` degrading to `[]`/`None` instead
+  of raising when the `shelters` table doesn't exist (a pre-Stage-11
+  database); and a from-scratch legacy-schema migration test that builds
+  a hazard table on the *original* `(segment_id, valid_time)` primary key
+  with no `scenario_cm`/`safe_wheelchair` columns, inserts a real row,
+  runs `init_schema()`, and confirms the columns are added, the primary
+  key is rebuilt to `(scenario_cm, segment_id, valid_time)`, the
+  pre-existing row survives with correct defaults, and a second
+  `init_schema()` call is a no-op — this exact migration path (mentioned
+  as a known gap in this project's own history) had never been exercised
+  by anything.
+
+**Two lines were deliberately left uncovered, not missed:** `db.py`'s
+`_bulk_insert` `except AttributeError` fallback to `df.to_sql()` only
+fires for a non-psycopg-3 driver, which this project doesn't use and
+isn't worth mocking around; `routing.py`'s baseline-path
+`except nx.NetworkXNoPath` in `route()` appears logically unreachable —
+the baseline search uses a strict superset of the edges the just-
+succeeded safe-route search was allowed to use, so it cannot fail if that
+one didn't. Chasing either to 100% would have meant testing a fake
+condition instead of real behavior.
+
+**Final state, full suite:** `DATABASE_URL=postgresql+psycopg://tidestep:tidestep@localhost:5432/tidestep python -m pytest tests/ -q --cov=tidestep`
+→ **266 passed, 0 skipped, 0 failed, 99% package coverage** (up from 199
+passed / 39 skipped / 85% at the start of this pass). Files touched:
+`tidestep/resilience.py` (the bug fix), `tests/test_new_features.py`,
+`tests/test_api.py`, `tests/test_integration.py`, `tests/test_db.py`,
+`docs/NOVELTY.md`, this file, `docs/STATUS.md`. From the laptop, in
+`tidestep-app`, after pulling this file-bridge sync:
+```
+git add tidestep/resilience.py tests/test_new_features.py tests/test_api.py tests/test_integration.py tests/test_db.py docs/NOVELTY.md docs/CHANGELOG.md docs/STATUS.md
+git commit -m "fix: resilience chokepoint scoring missing scenario_cm=0 filter; test: close nws/replay/api/db coverage gaps, run full suite against a live DB for the first time (266 passed, 0 skipped, 99% coverage)"
+git push
+```
+**Coordinate with your teammate before running this** — same shared-`.git`
+caution as every earlier pass's note here. Worth doing before the demo:
+set `DATABASE_URL` to a real (not just synthetic) Postgres once with real
+fetched data loaded and re-run `pytest tests/ -q` there too — this pass's
+238/266-passing runs were both against `scripts/dev_seed.py`'s synthetic
+"Cove Harbor" fixture plus a clean schema, which is the right thing for
+CI but is not itself proof the real Kings Point data loads cleanly under
+the now-migrated schema.
 
 ## Done (2026-09-15, sixteenth pass — closed the "Stage 8 alerting has no
 UI" gap, and a documentation-accuracy sweep against the actual repo)

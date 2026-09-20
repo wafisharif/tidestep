@@ -1,14 +1,18 @@
 # Status
 
-Updated: 2026-09-15. Pass-by-pass history lives in `CHANGELOG.md`; this
+Updated: 2026-09-20. Pass-by-pass history lives in `CHANGELOG.md`; this
 page is only what is true now and what is next.
 
 ## What works
 
 All ten pipeline stages plus the additions listed below run end to end on
 real data for the Kings Point / Manhasset Bay study area (55,577 road
-segments, 1 m DEM). 231 tests pass, including the PostGIS integration
-suite; CI runs them on every push (`.github/workflows/ci.yml`).
+segments, 1 m DEM). 266 tests pass with `DATABASE_URL` set to a reachable
+Postgres (0 skipped, 99% package coverage, `tidestep/api.py` at 100%) —
+that includes the PostGIS integration/db suite, which now actually runs
+in this sandbox (see `CHANGELOG.md`'s seventeenth pass); without a DB
+reachable, 50 of those skip and 216 still pass. CI runs them on every
+push (`.github/workflows/ci.yml`).
 
 | Area | State |
 |---|---|
@@ -36,6 +40,18 @@ suite; CI runs them on every push (`.github/workflows/ci.yml`).
   `.env.example`, GitHub Actions CI.
 - **Forecast window** 24 h → 36 h.
 - Docs slimmed: this page; history moved to `CHANGELOG.md`.
+
+### Added 2026-09-20
+
+- **Full test suite validated against a real, running PostGIS instance**
+  for the first time this project: schema creation, the idempotent
+  migrations (including the legacy hazard-primary-key rebuild), and every
+  raw SQL query function now have direct test coverage, not just the
+  API-level mocked paths. 266 passed / 0 skipped / 99% coverage (see
+  `CHANGELOG.md`'s seventeenth pass for the full breakdown).
+- Fixed a real bug found in the process: `resilience.py`'s chokepoint
+  priority score wasn't filtering to `scenario_cm = 0`, so it could mix
+  hours-unsafe counts across sea-level-rise scenarios.
 
 ## To do
 

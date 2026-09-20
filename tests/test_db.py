@@ -290,3 +290,181 @@ def test_saved_routes_crud_and_state_update(engine):
 
     db.delete_saved_route(engine, rid)
     assert db.list_saved_routes(engine) == []
+
+
+# --- gaps found via `pytest --cov=tidestep --cov-report=term-missing` after
+# the DB integration suite was first run against a live Postgres (2026-09):
+# get_engine()'s env-var default, load_segments()'s near_inlet fallback,
+# segments_geojson(), always_safe_nodes()'s validation/empty-hours guards,
+# and the legacy hazard-primary-key migration path were all still
+# genuinely untested even with a real database available. ----------------
+
+def test_get_engine_falls_back_to_database_url_env_var(monkeypatch):
+    """db.get_engine() with no explicit url reads DATABASE_URL itself
+    (every other fixture in this suite bypasses that by calling
+    sqlalchemy.create_engine directly with an already-resolved URL)."""
+    from tidestep import db
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    eng = db.get_engine()
+    with eng.connect() as conn:
+        assert conn.execute(text("SELECT 1")).scalar_one() == 1
+    eng.dispose()
+
+
+def test_get_engine_falls_back_to_default_url_when_no_env_var_set(monkeypatch):
+    from tidestep import db
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    eng = db.get_engine()
+    assert str(eng.url) == db.DEFAULT_URL.replace("tidestep:tidestep", "tidestep:***")
+
+
+def test_load_segments_defaults_near_inlet_false_when_column_missing(engine):
+    """A segments GeoDataFrame built without a near_inlet column (e.g. an
+    older segments.py that predates the near-inlet flag) must load with
+    every segment defaulted to not-near-inlet, rather than erroring on
+    the missing column."""
+    from tidestep import db
+    segs = _two_segments().drop(columns=["near_inlet"])
+    assert "near_inlet" not in segs.columns
+    n = db.load_segments(engine, segs)
+    assert n == 3
+    with engine.connect() as conn:
+        flagged = conn.execute(text("SELECT count(*) FROM segments WHERE near_inlet")).scalar_one()
+    assert flagged == 0
+
+
+def test_segments_geojson_returns_static_segment_feature_collection(engine):
+    """Used by the historical-replay endpoints (api.py's _segments_fc()) to
+    get segment geometry/attributes with no hazard join at all -- never
+    exercised directly against a real DB anywhere else in this suite (the
+    replay API tests mock it out to isolate replay.py's own logic)."""
+    from tidestep import db
+    db.load_segments(engine, _two_segments())
+    fc = db.segments_geojson(engine)
+    assert fc["type"] == "FeatureCollection"
+    assert len(fc["features"]) == 3
+    ids = {f["properties"]["segment_id"] for f in fc["features"]}
+    assert ids == {0, 1, 2}
+    for f in fc["features"]:
+        assert f["geometry"]["type"] == "LineString"
+        assert "flooded" not in f["properties"]   # no hazard join -- static only
+
+
+def test_always_safe_nodes_rejects_unknown_profile(engine):
+    from tidestep import db
+    with pytest.raises(ValueError, match="unknown profile"):
+        db.always_safe_nodes(engine, [0, 1], "dog")
+
+
+def test_always_safe_nodes_returns_empty_set_for_no_hours(engine):
+    """An empty ``hours`` iterable is a degenerate "safe at zero hours"
+    request -- must short-circuit to an empty set without ever issuing
+    the ANY(:hours)/COUNT(*) = :n SQL (which would be meaningless, and
+    for an empty array parameter behaves inconsistently across drivers)."""
+    from tidestep import db
+    assert db.always_safe_nodes(engine, [], "adult") == set()
+
+
+def test_always_safe_nodes_requires_every_requested_hour_present(engine):
+    """A node whose only segment is safe at hour 0 but has NO hazard row
+    at all for hour 1 must NOT count as "always safe across [0, 1]" --
+    the COUNT(*) = :n guard in the SQL exists specifically so a missing
+    row isn't vacuously treated as safe. Only the node reachable via a
+    segment safe at BOTH requested hours should come back."""
+    from tidestep import db
+    segs = _two_segments()
+    db.load_segments(engine, segs)
+    # segment 0 (u=1,v=2): safe at hour 0, but no row at all for hour 1
+    # segment 2 (u=2,v=3): safe at both hour 0 and hour 1
+    h0 = _hazard_for(segs, 0, flooded_ids=set())
+    h1 = _hazard_for(segs, 1, flooded_ids=set())
+    combined = pd.concat([h0, h1[h1.segment_id == 2]], ignore_index=True)
+    db.load_hazard(engine, combined)
+    nodes = db.always_safe_nodes(engine, [0, 1], "adult")
+    assert nodes == {2, 3}   # only segment 2's endpoints
+    assert 1 not in nodes    # segment 0's node -- missing an hour-1 row
+
+
+def test_shelter_points_returns_empty_list_when_table_is_missing(engine):
+    """shelter_points() must never raise for a database created before
+    Stage 11 added the shelters table at all -- route_to_safety() falls
+    back to plain dry-street routing in that case, so this has to degrade
+    to [] rather than a 500. init_schema() (called by the engine fixture
+    for every other test) always creates the table, so this drops it to
+    simulate a genuinely pre-Stage-11 database; the fixture's next
+    init_schema() call recreates it for whichever test runs after this."""
+    from tidestep import db
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS shelters"))
+    assert db.shelter_points(engine) == []
+
+
+def test_nearest_shelter_returns_none_when_table_is_missing(engine):
+    from tidestep import db
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS shelters"))
+    assert db.nearest_shelter(engine, 40.80, -73.71, max_m=1000) is None
+
+
+def test_init_schema_migrates_legacy_hazard_primary_key(engine):
+    """Before Stage 11 added sea-level-rise scenarios, hazard's primary
+    key was (segment_id, valid_time) with no scenario_cm column at all.
+    init_schema()'s MIGRATIONS block plus the _HAZARD_PK_HAS_SCENARIO
+    check must upgrade a database still on that legacy schema -- add the
+    new columns with safe defaults, rebuild the primary key to include
+    scenario_cm, and do it WITHOUT losing the pre-existing row -- and
+    running init_schema() a second time afterwards must be a no-op, not
+    an error (every server restart calls init_schema() unconditionally)."""
+    from tidestep import db
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS hazard"))
+        conn.execute(text("""
+            CREATE TABLE hazard (
+                segment_id         INTEGER NOT NULL REFERENCES segments(segment_id),
+                forecast_hour      INTEGER NOT NULL,
+                valid_time         TIMESTAMPTZ NOT NULL,
+                water_level_m      REAL,
+                depth_cm           INTEGER NOT NULL,
+                flooded            BOOLEAN NOT NULL,
+                safe_child         BOOLEAN NOT NULL,
+                safe_adult         BOOLEAN NOT NULL,
+                safe_vehicle_small BOOLEAN NOT NULL,
+                safe_vehicle_large BOOLEAN NOT NULL,
+                safe_vehicle_4wd   BOOLEAN NOT NULL,
+                PRIMARY KEY (segment_id, valid_time)
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO segments (segment_id, u, v, key, seg_idx, name, highway,
+                length_m, ground_m, near_inlet, geom)
+            VALUES (1, 1, 2, 0, 0, 'Test St', 'residential', 10.0, 0.5, false,
+                ST_GeomFromText('LINESTRING(-73.7 40.9, -73.699 40.9)', 4326))
+        """))
+        conn.execute(text("""
+            INSERT INTO hazard (segment_id, forecast_hour, valid_time, water_level_m,
+                depth_cm, flooded, safe_child, safe_adult, safe_vehicle_small,
+                safe_vehicle_large, safe_vehicle_4wd)
+            VALUES (1, 0, '2026-09-07T00:00:00Z', 0.3, 10, true, false, true, true, true, true)
+        """))
+        cols = {r[0] for r in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'hazard'")).all()}
+    assert "scenario_cm" not in cols and "safe_wheelchair" not in cols   # legacy confirmed
+
+    db.init_schema(engine)   # the migration under test
+
+    with engine.connect() as conn:
+        cols = {r[0] for r in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'hazard'")).all()}
+        assert {"scenario_cm", "safe_wheelchair"} <= cols
+        pk_cols = {r[0] for r in conn.execute(text(
+            "SELECT column_name FROM information_schema.key_column_usage "
+            "WHERE table_name = 'hazard' AND constraint_name = 'hazard_pkey'")).all()}
+        assert pk_cols == {"scenario_cm", "segment_id", "valid_time"}
+        row = conn.execute(text(
+            "SELECT scenario_cm, safe_wheelchair, depth_cm, flooded "
+            "FROM hazard WHERE segment_id = 1")).first()
+    assert tuple(row) == (0, True, 10, True)   # pre-existing row preserved, defaults applied
+
+    db.init_schema(engine)   # idempotency: must not raise the second time

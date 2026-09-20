@@ -475,3 +475,29 @@ def test_route_under_scenario_and_wheelchair(seeded_app):
     feats = client.get("/api/risk?hour=0").json()["features"]
     assert all("safe_wheelchair" in f["properties"] for f in feats)
     assert all("grade_pct" in f["properties"] for f in feats)
+
+
+def test_risk_endpoint_accepts_a_valid_bbox_and_filters_geographically(seeded_app):
+    """Every existing bbox test only exercises the malformed-input 400
+    path (never touching the database); this is the only test anywhere
+    that sends a well-formed bbox through to db.risk_geojson() and checks
+    it actually restricts the results, proving the ST_MakeEnvelope filter
+    (tidestep/db.py) and api.py's successful-parse return path both work
+    end to end against a real PostGIS instance."""
+    client, *_ = seeded_app
+    unfiltered = client.get("/api/risk", params={"hour": 7}).json()["features"]
+    assert unfiltered   # sanity: the synthetic scenario has segments at all
+
+    # a generous bbox around the synthetic "Cove Harbor" fixture (centered
+    # on ORIGIN_LON/ORIGIN_LAT = -73.700, 40.900 in scripts/dev_seed.py)
+    # must return the same segments as no bbox at all
+    enclosing = client.get("/api/risk", params={
+        "hour": 7, "bbox": "40.85,-73.75,40.95,-73.65"}).json()["features"]
+    assert {f["properties"]["segment_id"] for f in enclosing} == \
+        {f["properties"]["segment_id"] for f in unfiltered}
+
+    # a bbox nowhere near the fixture (south of the equator, off the coast
+    # of west Africa) must exclude every segment
+    far_away = client.get("/api/risk", params={
+        "hour": 7, "bbox": "0,0,1,1"}).json()["features"]
+    assert far_away == []
